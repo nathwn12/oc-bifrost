@@ -1,6 +1,14 @@
 # oc-bifrost
 
+[![npm](https://img.shields.io/npm/v/@nathwn12/oc-bifrost?label=npm&color=205EA6)](https://www.npmjs.com/package/@nathwn12/oc-bifrost)
+[![check](https://github.com/nathwn12/oc-bifrost/actions/workflows/ci.yml/badge.svg)](https://github.com/nathwn12/oc-bifrost/actions/workflows/ci.yml)
+[![license: MIT](https://img.shields.io/badge/license-MIT-66800B.svg)](LICENSE)
+
 **The rainbow bridge for OpenCode plugins.** Run V1-era plugin hooks on the OpenCode **V2** runtime.
+
+```sh
+npm i @nathwn12/oc-bifrost
+```
 
 OpenCode V2 intentionally broke the plugin API — a V1 plugin module is now hard-rejected at load:
 
@@ -11,7 +19,32 @@ Most plugins never got ported. `oc-bifrost` is one small plugin that loads them 
 
 ## Install
 
-### Local (before the package is published)
+### Package (recommended)
+
+```sh
+npm i @nathwn12/oc-bifrost
+```
+
+```jsonc
+{
+  "plugins": [
+    {
+      "package": "@nathwn12/oc-bifrost",
+      "options": {
+        "plugins": ["./.opencode/legacy/rtk.ts"],
+        "strict": false,
+        "verbose": true
+      }
+    }
+  ]
+}
+```
+
+> **Never leave a V1 plugin inside `.opencode/plugins/`.** V2 rejects it there with
+> `Plugin must export a default definition with an id and an effect or setup function` before
+> oc-bifrost can see it. Park legacy files in `.opencode/legacy/`.
+
+### Local (pinned checkout, or offline)
 
 A configured local plugin entry **must be a directory**, not a file — the host rejects a file with
 `configured plugin path must be a directory`. Use a directory containing an `index.js` that
@@ -33,23 +66,6 @@ re-exports the built plugin:
         "strict": false,
         "verbose": true
       }
-    }
-  ]
-}
-```
-
-> **Never leave a V1 plugin inside `.opencode/plugins/`.** V2 rejects it there with
-> `Plugin must export a default definition with an id and an effect or setup function` before
-> oc-bifrost can see it. Park legacy files in `.opencode/legacy/`.
-
-### Package (after publish)
-
-```jsonc
-{
-  "plugins": [
-    {
-      "package": "@nathwn12/oc-bifrost",
-      "options": { "plugins": ["./.opencode/legacy/rtk.ts"] }
     }
   ]
 }

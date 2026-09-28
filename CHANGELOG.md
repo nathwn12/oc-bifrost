@@ -1,5 +1,17 @@
 # Changelog
 
+## 1.0.1
+
+### Fixed
+
+- **The `github:` cache no longer lands in every project you open.** Fetched plugins are now stored
+  under the shared OpenCode user cache — `$XDG_CACHE_HOME/opencode/oc-bifrost/github/<id>/`
+  (default: `~/.cache/opencode/oc-bifrost/github/<id>/`) — instead of a fresh `<project>/legacy/cache/`
+  per working directory. One verified copy now serves every project.
+  Because the move changes the cache location, the cache is **cold on upgrade**: the first mount
+  re-fetches once and needs the same one-time opt-in it needed the first time. Old
+  `<project>/legacy/cache/` directories are no longer read or written and can be deleted.
+
 ## 1.0.0
 
 First stable release.

@@ -81,6 +81,18 @@ function currentPin() {
   try {
     source = fs.readFileSync(PATHS.preset, "utf8")
   } catch (error) {
+    if (error.code === "ENOENT") {
+      // The published package ships `dist/`, not `src/`, so this script cannot
+      // rewrite the pin from inside `node_modules`. The copy that ships is there
+      // for auditability; say that instead of surfacing a bare ENOENT.
+      const installed = ROOT.includes(`${path.sep}node_modules${path.sep}`)
+      fail(
+        `${installed ? "this is an INSTALLED copy" : "this is not a source checkout"} ` +
+          `(${ROOT}): src/preset.ts is missing, so the pin cannot be rewritten. ` +
+          `The updater needs a clone of the repository - the copy shipped inside the npm ` +
+          `package is included for auditability, not to be run from node_modules.`,
+      )
+    }
     fail(`could not read src/preset.ts: ${error.message}`)
   }
   const matches = [...source.matchAll(/version:\s*"([^"]+)"/g)]

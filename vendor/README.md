@@ -37,6 +37,10 @@ provenance in `vendor/rtk.meta.json` (and the table above), and the version in `
 
 **Primary path — the updater.**
 
+> **Requires a source checkout.** It rewrites `src/preset.ts` (the pin), `vendor/rtk.ts` and this file —
+> and `src/` is not part of the published package. The copy that ships inside the npm tarball is
+> included for auditability, not to be run from `node_modules`.
+
 ```sh
 npm run vendor:update                          # latest upstream release (network)
 npm run vendor:update -- --ref v0.51.0         # a specific tag

@@ -22,7 +22,7 @@ Confirmed in-product:
 
 ```
 $ opencode debug paths
-config     C:\Users\nathan\AppData\Local\Temp\opencode\bifrost-sandbox\config
+config     C:\Users\you\AppData\Local\Temp\opencode\bifrost-sandbox\config
 ```
 
 The global harness (`~/.config/opencode`) was never loaded. The override was set **per process only** — never persisted to User or Machine environment.

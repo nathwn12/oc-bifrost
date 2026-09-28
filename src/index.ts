@@ -127,7 +127,7 @@ export function importFailureMessage(spec: string, directory: string, target: st
     `could not import "${spec}" — resolved against "${directory}" to "${target}".`,
     `  ${error.message}`,
     `  fix: relative specifiers resolve against the SESSION directory, not this plugin's own location.`,
-    `  For a global install use an absolute path, "~/...", or "preset:rtk".`,
+    `  For a global install use an absolute path or "~/..."; the bundled offline fallback "preset:rtk" also works.`,
   ].join("\n")
 }
 

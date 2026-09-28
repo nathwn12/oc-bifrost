@@ -1,0 +1,31 @@
+name: Hook coverage
+description: Request that a V1 hook be bridged (or bridged better).
+title: "[hook] "
+labels: ["hook-coverage"]
+body:
+  - type: input
+    id: hook
+    attributes:
+      label: V1 hook
+      description: The exact hook key, e.g. `chat.params`.
+    validations:
+      required: true
+  - type: dropdown
+    id: level
+    attributes:
+      label: Current matrix level
+      options: [unsupported, partial, full, not listed]
+    validations:
+      required: true
+  - type: textarea
+    id: destination
+    attributes:
+      label: Suspected V2 destination
+      description: If you know it, cite the file and line in the OpenCode V2 source.
+  - type: textarea
+    id: usecase
+    attributes:
+      label: What breaks without it
+      description: The plugin and behaviour that depends on this hook.
+    validations:
+      required: true

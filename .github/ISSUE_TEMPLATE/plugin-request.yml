@@ -1,0 +1,39 @@
+name: Plugin request
+description: Request support for a plugin that does not work through oc-bifrost yet.
+title: "[plugin] "
+labels: ["plugin-request"]
+body:
+  - type: input
+    id: plugin
+    attributes:
+      label: Plugin
+      description: Name and link (npm or GitHub).
+    validations:
+      required: true
+  - type: input
+    id: version
+    attributes:
+      label: Version
+      description: Exact version you tried.
+    validations:
+      required: true
+  - type: textarea
+    id: hooks
+    attributes:
+      label: Hooks it registers
+      description: Paste the V1 `Hooks` object keys, or the source link.
+    validations:
+      required: true
+  - type: textarea
+    id: error
+    attributes:
+      label: What happened
+      description: The load error or the compatibility report oc-bifrost printed.
+    validations:
+      required: true
+  - type: checkboxes
+    id: matrix
+    attributes:
+      label: Already checked the matrix?
+      options:
+        - label: I checked README.md and the hooks it needs are not yet bridged.

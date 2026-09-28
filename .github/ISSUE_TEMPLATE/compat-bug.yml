@@ -1,0 +1,38 @@
+name: Compatibility bug
+description: Something that used to work through oc-bifrost stopped working.
+title: "[bug] "
+labels: ["bug"]
+body:
+  - type: input
+    id: bifrost
+    attributes:
+      label: oc-bifrost version
+    validations:
+      required: true
+  - type: input
+    id: opencode
+    attributes:
+      label: OpenCode version
+      description: Output of `opencode --version`.
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected
+    validations:
+      required: true
+  - type: textarea
+    id: actual
+    attributes:
+      label: Actual
+      description: Include the compatibility report and any error output.
+    validations:
+      required: true
+  - type: textarea
+    id: repro
+    attributes:
+      label: Reproduction
+      description: The plugin, its options, and the smallest command that shows it.
+    validations:
+      required: true

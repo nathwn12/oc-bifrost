@@ -4,7 +4,7 @@ import fs from "node:fs"
 import os from "node:os"
 import path from "node:path"
 import { pathToFileURL } from "node:url"
-import { resolveSpec } from "../dist/index.js"
+import { githubCacheRoot, resolveSpec } from "../dist/index.js"
 import {
   assertInsideRoot,
   consentMessage,
@@ -156,6 +156,18 @@ test("githubLabel: round-trips the parsed form", () => {
 })
 
 /* ---- specifier routing ---- */
+
+test("githubCacheRoot: GitHub plugins share the user-level OpenCode cache, never the working project", () => {
+  const home = path.join(os.tmpdir(), "oc-bifrost-home-test")
+  assert.equal(
+    githubCacheRoot(home, {}),
+    path.join(home, ".cache", "opencode", "oc-bifrost", "github"),
+  )
+  assert.equal(
+    githubCacheRoot(home, { XDG_CACHE_HOME: path.join(home, "xdg-cache") }),
+    path.join(home, "xdg-cache", "opencode", "oc-bifrost", "github"),
+  )
+})
 
 test("resolveSpec: a github: spec parses to the github kind", () => {
   assert.deepEqual(resolveSpec("github:obra/superpowers", "some/dir"), {

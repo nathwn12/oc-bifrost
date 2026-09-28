@@ -25,7 +25,7 @@ The bridge is **one entry** in the `plugins` array of your `opencode.jsonc`; Ope
 {
   "plugins": [
     {
-      "package": "@nathwn12/oc-bifrost@1.0.0",
+      "package": "@nathwn12/oc-bifrost@1.0.1",
       "options": {
         "trustRemote": true, // consent: the first `github:` fetch downloads and executes a remote plugin
         "plugins": ["github:obra/superpowers"]
@@ -47,7 +47,7 @@ Name each legacy plugin with **exactly one** of three specifiers:
 
 ### 📌 Version choice & updates
 
-- **Pin the exact version** — `"package": "@nathwn12/oc-bifrost@1.0.0"`. Predictable, and the version these docs describe.
+- **Pin the exact version** — `"package": "@nathwn12/oc-bifrost@1.0.1"`. Predictable, and the version these docs describe.
 - `@^1.0.0` auto-tracks 1.x and never adopts a new major silently.
 - A bare `@nathwn12/oc-bifrost` or `@latest` may be unstable while OpenCode's plugin cache settles.
 - **If an update does not appear:** run `opencode plugin check`; if it still does not, delete `~/.cache/opencode/npm/@nathwn12/oc-bifrost@latest` and reload.
@@ -61,7 +61,7 @@ Mounting a `github:` plugin executes a remote file **in the host process, with y
 - **Cold cache refuses by default** — nothing is fetched or executed until you opt in, per bridge entry: `"trustRemote": true`, or `OC_BIFROST_TRUST=github` (an explicit `false` wins over the env var).
 - **Warm, hash-verified cache** loads on its own: no re-consent, no network. A hash mismatch refuses loudly instead of running unverified bytes.
 - **The mount report keeps consent informed** — one line naming the resolved commit, the `sha256` digest, the byte count, and that it executes with the host process's full user rights.
-- **Offline or air-gapped** — the cold-cache fetch is fail-closed; pre-warm on a networked machine and copy `legacy/cache/` across.
+- **Offline or air-gapped** — the cold-cache fetch is fail-closed; pre-warm on a networked machine and copy the shared `oc-bifrost/github/` cache across. It lives under `$XDG_CACHE_HOME/opencode/` or, by default, `~/.cache/opencode/`.
 
 ---
 
@@ -70,7 +70,7 @@ Mounting a `github:` plugin executes a remote file **in the host process, with y
 **Optional; not the advertised route.** When GitHub is unreachable — an offline or air-gapped host — `preset:rtk` mounts a **bundled** V1 plugin (`vendor/rtk.ts`, verbatim `rtk-ai/rtk` `v0.50.0`, Apache-2.0) with **zero network**. It is opt-in, so nothing from RTK runs unless you ask for it.
 
 ```jsonc
-{ "package": "@nathwn12/oc-bifrost@1.0.0", "options": { "plugins": ["preset:rtk"] } }
+{ "package": "@nathwn12/oc-bifrost@1.0.1", "options": { "plugins": ["preset:rtk"] } }
 ```
 
 **Prerequisite:** the `rtk` binary (`>= 0.23.0`) on `PATH`; `preset:rtk` probes before mounting and names this command if it is missing. No winget? Take the release asset from [`rtk-ai/rtk`](https://github.com/rtk-ai/rtk/releases) instead. Not from crates.io — `cargo install rtk` installs a different project.

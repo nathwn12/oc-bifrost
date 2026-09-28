@@ -45,6 +45,15 @@ function normalizeEntries(options: BifrostOptions | undefined): Array<{ spec: st
   )
 }
 
+/** The shared OpenCode cache root for fetched GitHub plugins. */
+export function githubCacheRoot(
+  homeDirectory = os.homedir(),
+  env: NodeJS.ProcessEnv = process.env,
+): string {
+  const cacheHome = env.XDG_CACHE_HOME || path.join(homeDirectory, ".cache")
+  return path.join(cacheHome, "opencode", "oc-bifrost", "github")
+}
+
 /**
  * A resolved specifier. Discriminated so the caller can branch between a
  * mountable module URL, a bundled preset, and a remote `github:` spec without
@@ -68,8 +77,8 @@ export function unsupportedSpecifierMessage(spec: string): string {
  *
  * Supported forms, in order:
  *   - `github:<owner>/<repo>[@<ref>][#<path>]` -> a remote V1 plugin, mounted
- *                BY SOURCE: resolved cache-first into a verified local cache
- *                under the location directory (`legacy/cache/`). The FIRST
+ *                BY SOURCE: resolved cache-first into a verified user-level
+ *                OpenCode cache shared across project locations. The FIRST
  *                fetch requires explicit consent (`options.trustRemote: true`
  *                or `OC_BIFROST_TRUST=github`) — a cold cache refuses to
  *                fetch+execute otherwise. The ref resolves to a commit sha
@@ -190,12 +199,12 @@ export default Plugin.define({
         // Cache-first with an explicit consent gate: a cold cache refuses to
         // fetch+execute unless opted in (`options.trustRemote` or the
         // OC_BIFROST_TRUST=github env); a warm, hash-verified cache loads
-        // with zero network and no re-consent. The cache lives under the same
-        // location directory that hosts the config naming this plugin.
+        // with zero network and no re-consent. The cache is user-level, not
+        // tied to the project that happens to load the plugin.
         let gh: GithubResolveResult
         try {
           gh = await resolveGithubPlugin(resolved.spec, {
-            cacheRoot: path.join(directory, "legacy", "cache"),
+            cacheRoot: githubCacheRoot(),
             trusted: remoteTrustEnabled(options.trustRemote, process.env),
           })
         } catch (error) {

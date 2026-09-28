@@ -20,12 +20,15 @@ import { buildV1Context } from "./context.js"
 import { registerV1Hooks } from "./hooks.js"
 import { scanStrandedV1, strandedWarning } from "./scan.js"
 import { PRESETS, checkPrerequisite, type Preset, type PrerequisiteCheck } from "./preset.js"
+import { checkFreshness, freshnessEnabled, pinnedNote } from "./freshness.js"
 import type { BifrostOptions, OCContext, PluginEntry } from "./types.js"
 
 export { COMPAT_MATRIX, matrixRow } from "./compat-matrix.js"
 export type { MatrixRow } from "./compat-matrix.js"
 export { PRESETS } from "./preset.js"
 export type { Preset, PresetRequires } from "./preset.js"
+export { compareTags, pinnedNote, freshnessEnabled, checkFreshness } from "./freshness.js"
+export type { FreshnessResult } from "./freshness.js"
 
 function normalizeEntries(options: BifrostOptions | undefined): Array<{ spec: string; options?: Record<string, unknown> }> {
   const raw = options?.plugins ?? []
@@ -135,15 +138,18 @@ export default Plugin.define({
 
       let specifier: string
       let presetNote: string | undefined
+      let bundle: Preset | undefined
       if (resolved.kind === "preset") {
-        const bundle: Preset = PRESETS[resolved.id] as Preset
+        bundle = PRESETS[resolved.id] as Preset
         const check: PrerequisiteCheck = await checkPrerequisite(bundle)
         if (!check.ok) {
           if (options.strict) throw new Error(`[oc-bifrost] ${check.message}`)
           reporter.warn(check.message)
           continue
         }
-        presetNote = check.message
+        // The offline pin is always reported, folded into the existing note so
+        // the mount report names the vendored version with zero network access.
+        presetNote = `${check.message}; ${pinnedNote(bundle)}`
         specifier = bundle.entry.href
       } else {
         specifier = resolved.url
@@ -165,6 +171,7 @@ export default Plugin.define({
         continue
       }
 
+      let mounted = false
       try {
         if (shape.kind === "v2") {
           if (typeof shape.definition.setup === "function") {
@@ -188,9 +195,28 @@ export default Plugin.define({
         if (resolved.kind === "preset" && presetNote) {
           reporter.record(`preset:${resolved.id}`, "mounted", presetNote)
         }
+        mounted = true
       } catch (error) {
         reporter.warn(`failed to mount "${entry.spec}": ${(error as Error).message}`)
         if (options.strict) throw error
+      }
+
+      // Opt-in freshness check. This does NOT delay plugin setup: the request
+      // is fired without awaiting and the notice may appear shortly after the
+      // mount report. Both handlers are attached so a rejection can never
+      // surface as an unhandled rejection. `behind` warns; anything else is
+      // silent (the pinned note already shows in the report). The request is
+      // timeboxed by checkFreshness, which is the only bound it needs.
+      if (mounted && bundle && freshnessEnabled(options.freshness, process.env)) {
+        const spec = bundle
+        void checkFreshness(spec).then(
+          (freshness) => {
+            if (freshness.status === "behind") reporter.warn(freshness.message)
+          },
+          () => {
+            // checkFreshness never rejects by contract; belt and braces.
+          },
+        )
       }
 
       if (options.verbose !== false) {

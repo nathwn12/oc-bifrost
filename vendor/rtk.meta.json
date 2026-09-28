@@ -1,0 +1,11 @@
+{
+  "id": "rtk",
+  "upstream": "rtk-ai/rtk",
+  "ref": "v0.50.0",
+  "path": "hooks/opencode/rtk.ts",
+  "license": "Apache-2.0",
+  "sha256": "6530c131946c84892f9522abd68d4e513e1e658d8ddbad1f59388c86ebbcb6bb",
+  "gitBlob": "c4450cfa999898fb67d4a09ef2cabaa19296724d",
+  "bytes": 1339,
+  "updatedAt": "2026-09-28T00:00:00.000Z"
+}

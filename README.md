@@ -160,6 +160,37 @@ Then a shell command like `git status` executes as `rtk git status`. Live eviden
 > **silently** — no error, the plugin just never loads. Use the npm package name (Route A above)
 > or the shim directory shown in Route B. Both are proven in [`PROOF.md`](PROOF.md).
 
+## Staying fresh
+
+The bundled `preset:rtk` is **pinned** to a specific upstream tag (`vendor/rtk.ts` is byte-identical
+to `rtk-ai/rtk`; its sha256, git blob, and license are recorded in `vendor/README.md` and
+`vendor/rtk.meta.json`). The mount report always names the pinned version — with **zero network
+access**.
+
+Optionally, you can ask the bridge to compare that pin against upstream's latest release:
+
+```jsonc
+{ "package": "@nathwn12/oc-bifrost", "options": { "freshness": "online" } }
+```
+
+- **The check is off by default.** Enable it with `freshness: "online"` or the environment
+  variable `OC_BIFROST_FRESHNESS=online`. An explicit option wins over the environment variable.
+- **It never downloads or executes plugin code.** It only reads the upstream releases API, is
+  timeboxed, and never throws. It is fired **off the plugin-load path** — not awaited during `setup` — so a slow
+  network cannot delay or break a mount; the notice may appear shortly after the mount report.
+  Being offline, rate-limited, or otherwise unable to check reports `unknown` (informational), not
+  an error, so an offline machine stays quiet.
+- When it reports **behind**, update along one of two paths:
+
+  ```sh
+  npm i @nathwn12/oc-bifrost@latest   # an installed copy
+  npm run vendor:update               # a source checkout (offline: --from-file)
+  ```
+
+  A source checkout can preview and validate first: `npm run vendor:update -- --dry-run`. The
+  updater rewrites every copy of the pin and runs the full check; if the check fails it prints the
+  exact revert.
+
 ## Let your agent set it up
 
 This is an **agent-first** repo. You do not have to read the install steps — tell your agent:
@@ -221,6 +252,7 @@ This bridges **the mappable subset**, not "any plugin, seamlessly." Three V1 hoo
 | `plugins` | `Array<string \| { spec, options }>` | `[]` | Modules to bridge |
 | `strict` | `boolean` | `false` | Abort setup on an unsupported hook |
 | `verbose` | `boolean` | `true` | Print the per-plugin compatibility report |
+| `freshness` | `"off" \| "online"` | `"off"` | Check the bundled pin against upstream's latest release after mounting |
 
 ## Develop
 

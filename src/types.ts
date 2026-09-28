@@ -15,7 +15,11 @@ export type PluginEntry = string | { spec: string; options?: Record<string, unkn
 export interface BifrostOptions {
   /** Plugins to bridge. V1-era factories and V2-era definitions are both accepted. */
   plugins?: PluginEntry[]
-  /** When true, an unsupported V1 hook aborts setup instead of warning and skipping. */
+  /**
+   * When true, setup aborts instead of warning-and-skipping: an unsupported V1
+   * hook, or any entry that cannot be resolved, imported, or mounted. Without it,
+   * a bad entry is skipped so the remaining plugins still mount.
+   */
   strict?: boolean
   /** Emit a compatibility report to the console on load. Defaults to true. */
   verbose?: boolean

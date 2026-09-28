@@ -124,7 +124,62 @@ Total commands:    1
 
 This is the strongest proof available here: not a side effect we inferred, but the host's own record of the command it executed.
 
-## Defect found by this test (now documented)
+## Proof 5 — `preset:rtk` mounted from the PACKED TARBALL, in a real host
+
+The strongest proof in this file: it exercises the artifact a user actually installs, the
+zero-fetch preset path, the vendored `.ts` import under Bun, and the prerequisite probe.
+
+Method — no network, no published version required:
+
+1. `npm pack` → `nathwn12-oc-bifrost-0.2.0.tgz`
+2. `npm install` that tarball into an isolated tree
+3. A directory-shim entry re-exporting the installed package's `dist/index.js`
+   (the shape [`README.md`](README.md) Route B documents), configured with **only**
+   `"plugins": ["preset:rtk"]`
+4. A headless host with `OPENCODE_CONFIG_DIR` pointed at that sandbox config
+
+| Field | Value |
+|---|---|
+| Date | 2026-09-28 |
+| Host | OpenCode **2.0.18** (Windows) |
+| Artifact | `nathwn12-oc-bifrost-0.2.0.tgz` |
+| Config | `{"plugins":[{"package":"<shim>","options":{"plugins":["preset:rtk"]}}]}` |
+| rtk binary | 0.50.0 |
+
+Load:
+
+```
+msg="loading plugin" id=.../shim/oc-bifrost
+  entrypoint=file:///.../shim/oc-bifrost/index.js
+```
+
+Execution — the host's own spawn log:
+
+```
+message="spawning process" args=["-NoLogo","-NoProfile","-NonInteractive",
+  "-Command","rtk git status --porcelain"]
+```
+
+The agent asked for `git status --porcelain`. The command that ran was
+`rtk git status --porcelain`.
+
+**What this rules out:**
+
+- The vendored `.ts` import works under Bun from inside the packaged artifact — the
+  unprefixed entry URL (`../vendor/rtk.ts`) resolves from `dist/`.
+- The prerequisite probe passed. A missing `rtk` would have printed
+  `requires the "rtk" binary … and rewrite nothing` and the command would have run
+  unrewritten. It was rewritten.
+- `files` ships `vendor/`; without it the preset entry would have failed to import.
+
+### Known limitation found while building this proof
+
+A configured entry that points **directly at the installed package directory** is dropped by
+the host **silently** — no log, no warning, the plugin simply never loads. The package resolves
+correctly at every resolver we tested (`Bun.resolveSync`, `require.resolve`, `Host.resolve`'s
+own call), so the drop happens in the host's absolute-directory branch, not in this package.
+Use the documented shim (Route B) or the npm package name (Route A); both are proven.
+
 
 A configured local plugin entry **must be a directory** in the tested host, not a file:
 

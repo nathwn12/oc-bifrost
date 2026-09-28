@@ -1,0 +1,37 @@
+# vendor/
+
+Third-party code redistributed with oc-bifrost. **Nothing here is modified.**
+
+## `rtk.ts`
+
+| Field | Value |
+|---|---|
+| Upstream | [`rtk-ai/rtk`](https://github.com/rtk-ai/rtk) |
+| Upstream path | `hooks/opencode/rtk.ts` |
+| Version | `v0.50.0` |
+| Git blob | `c4450cfa999898fb67d4a09ef2cabaa19296724d` |
+| sha256 | `6530c131946c84892f9522abd68d4e513e1e658d8ddbad1f59388c86ebbcb6bb` |
+| Bytes | 1339 |
+| License | Apache-2.0 — full text in `rtk-LICENSE` |
+| Upstream disclaimer | `rtk-DISCLAIMER.md` |
+| **Changes** | **none — byte-identical** |
+
+### Why it is vendored
+
+Upstream's own installer documents writing this file to
+`~/.config/opencode/plugins/rtk.ts` (see upstream `hooks/opencode/README.md`). That is a plugin
+**discovery** directory. OpenCode V2 loads a bare `.ts` file found there *directly* and hard-rejects
+a V1 module — before oc-bifrost can ever see it. So the documented install path is precisely the one
+that breaks.
+
+Vendoring lets the `preset:rtk` spec mount the same bytes from a location V2 never scans.
+
+Because the file is unmodified, Apache-2.0's "state your changes" clause is not triggered. The full
+license text travels alongside as `rtk-LICENSE`.
+
+### Updating this copy
+
+1. Fetch `hooks/opencode/rtk.ts` at a new tag.
+2. Record the new byte length, git blob, and sha256 in the table above.
+3. Update the pinned version in `src/preset.ts`.
+4. Keep `rtk-LICENSE` current; Apache-2.0 permits redistribution with the license retained.

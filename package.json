@@ -1,6 +1,6 @@
 {
   "name": "@nathwn12/oc-bifrost",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "The rainbow bridge for OpenCode plugins — run V1-era plugin hooks on the OpenCode V2 runtime, seamlessly.",
   "keywords": [
     "opencode",
@@ -18,22 +18,33 @@
     "url": "git+https://github.com/nathwn12/oc-bifrost.git"
   },
   "type": "module",
+  "main": "./dist/index.js",
   "exports": {
     ".": {
       "types": "./dist/index.d.ts",
-      "import": "./dist/index.js"
+      "import": "./dist/index.js",
+      "default": "./dist/index.js"
     }
   },
   "files": [
     "dist",
+    "vendor",
     "README.md",
-    "LICENSE"
+    "LICENSE",
+    "THIRD-PARTY-NOTICES.md",
+    "CHANGELOG.md",
+    "INSTALL.md",
+    "PROOF.md",
+    "VERIFIED-PLUGINS.md",
+    "CONTRIBUTING.md",
+    "skills"
   ],
   "scripts": {
     "build": "tsc -p tsconfig.json",
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "test": "node --test test/*.test.js",
-    "check": "npm run typecheck && npm run build && npm run test"
+    "check": "npm run typecheck && npm run build && npm run test",
+    "prepublishOnly": "npm run check"
   },
   "peerDependencies": {
     "@opencode/plugin": ">=2.0.0"

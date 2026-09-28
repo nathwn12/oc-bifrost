@@ -121,6 +121,45 @@ published digest.
 > and so is `rtk-cli`. `cargo install rtk` gives you the wrong binary. Install from
 > `rtk-ai/rtk` only.
 
+### First proof: mount RTK with one line
+
+RTK is the bridge's showcase — a real, unmodified V1 plugin whose effect you can *watch*.
+
+```jsonc
+{
+  "plugins": [
+    { "package": "@nathwn12/oc-bifrost", "options": { "plugins": ["preset:rtk"] } }
+  ]
+}
+```
+
+The plugin file is **bundled** — `vendor/rtk.ts`, verbatim `rtk-ai/rtk` `v0.50.0` (Apache-2.0) — so
+nothing is fetched at install time. Two things make it an honest demo:
+
+- **The prerequisite is checked, loudly.** RTK's plugin self-disables when the `rtk` binary is
+  absent. `preset:rtk` probes for it *before* mounting and names the exact install command if it is
+  missing, instead of mounting and silently rewriting nothing.
+- **It is opt-in.** Nothing from RTK runs unless you ask for `preset:rtk`.
+
+You still need the binary — the bridge bridges **hooks**, not binaries:
+
+```sh
+winget install rtk-ai.rtk        # Windows
+brew install rtk                 # macOS / Linux
+```
+
+Then a shell command like `git status` executes as `rtk git status`. Live evidence:
+[`PROOF.md`](PROOF.md) Proof 4 and [`VERIFIED-PLUGINS.md`](VERIFIED-PLUGINS.md).
+
+> ⚠️ **Do not run `rtk init -g --opencode`.** Upstream installs to
+> `~/.config/opencode/plugins/rtk.ts` — a discovery directory where V2 hard-rejects V1 modules.
+> `preset:rtk` exists precisely so you never touch that path.
+
+> ⚠️ **A directory entry must be the documented shim, not the installed package directory.**
+> Pointing `package` straight at `node_modules/@nathwn12/oc-bifrost` is dropped by the host
+> **silently** — no error, the plugin just never loads. Use the npm package name (Route A above)
+> or the shim directory shown in Route B. Both are proven in [`PROOF.md`](PROOF.md).
+
 ## Let your agent set it up
 
 This is an **agent-first** repo. You do not have to read the install steps — tell your agent:

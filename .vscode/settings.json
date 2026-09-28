@@ -1,0 +1,8 @@
+{
+  // Use the workspace TypeScript so the editor agrees with `npm run check`.
+  "typescript.tsdk": "node_modules/typescript/lib",
+  "typescript.enablePromptUseWorkspaceTsdk": true,
+  // The editor is most reliable when the repo folder itself is open. If you have
+  // opened a parent folder instead, these still keep TS on the right tsconfig.
+  "typescript.preferences.includePackageJsonAutoImports": "on"
+}

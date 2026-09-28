@@ -91,6 +91,21 @@ Move it out of discovery — `.opencode/legacy/<name>.ts` is the convention — 
 - relative specifiers resolve against the **session directory**
 - absolute paths and npm names work too
 
+### Global install (all projects)
+
+The same rule applies with a sharper edge at the global config:
+
+- Park the legacy plugin in `<config>/legacy/<name>.ts` — **never** in `<config>/plugin/`
+  or `<config>/plugins/`. Those two are discovery directories: a bare `.ts` file there is
+  loaded directly and hard-rejected before the bridge can see it.
+- Reference it by **absolute path**. The bridge resolves relative specifiers against the
+  session directory, so `./legacy/rtk.ts` only works in the one project that owns that file.
+
+> **Known landmine.** Some plugins ship their own installer — `rtk init -g --opencode` writes
+> the plugin straight into `<config>/plugins/`. Because that directory is scanned, the
+> installer *breaks* the host instead of wiring the bridge. Park the file in `legacy/` and
+> reference it from `options.plugins` instead.
+
 ## 5. Verify (do not skip — this is the deliverable)
 
 1. Restart the host so the config reloads.
@@ -99,6 +114,17 @@ Move it out of discovery — `.opencode/legacy/<name>.ts` is the convention — 
    - the load log contains `loading plugin` for the bridge entrypoint, and **no** `LoadError`;
    - the bridge printed a per-plugin report: `mounted v1:<id>`, then a row per hook.
 4. If the plugin's behaviour is observable (a rewritten command, a marker file, a toast), assert on the **side effect**, not on the report. The report says what was registered; only the side effect says it executed.
+5. **Strongest check — read the host's spawn log.** Run a host with `--print-logs` and grep for `spawning process`. The logged `args` are the command that *actually executed*, after every `tool.execute.before` rewrite — the host's own record, not an inference:
+
+   ```pwsh
+   opencode run --standalone --print-logs --format json "run exactly: git status --porcelain"
+   # then:
+   Select-String -Path <captured output> -Pattern 'spawning process'
+   ```
+
+   A bridged rewrite shows up as e.g. `rtk git status --porcelain`. Note the tool-call record
+   still shows the *pre-rewrite* input, so the spawn log is the only place the real command is
+   visible.
 
 **Legend:** `full` = bridged with write-back · `partial` = bridged with a stated loss · `unsupported` = refused out loud (set `strict: true` to abort instead).
 

@@ -12,18 +12,10 @@ Do not hand the human a wall of steps. Do them, then report: what you changed, w
 2. Locate the config in use: `opencode debug paths` → read the `config` line. **Never assume `~/.config/opencode`** — respect the reported path. If `OPENCODE_CONFIG_DIR` is set, that is the config root.
 3. Confirm you may write there. The global config directory is often owned by a stricter writer agent. If your write is denied, **hand the edit to that writer; never reword the path or route it through a shell**.
 
-## 1. Decide the route
+## 1. Add the bridge entry
 
-| Route | Use when | Trade-off |
-|---|---|---|
-| **A — package** (recommended) | `@nathwn12/oc-bifrost` is published | one config line |
-| **B — local** | unpublished, or pinned to a checkout | needs a directory entry (host rejects file paths) |
-
-Ask nothing. Pick A if the package resolves (`npm view @nathwn12/oc-bifrost version`); otherwise B.
-
-## 2. Route A — package
-
-Add to the config's `plugins` array:
+The bridge is one entry in the config's `plugins` array. OpenCode resolves and installs the npm
+package itself — there is no separate `npm i` step:
 
 ```jsonc
 {
@@ -31,7 +23,7 @@ Add to the config's `plugins` array:
     {
       "package": "@nathwn12/oc-bifrost",
       "options": {
-        "plugins": ["<specifier for each legacy plugin>"],
+        "plugins": ["<exactly one specifier — one of the three paths below>"],
         "strict": false,
         "verbose": true
       }
@@ -40,65 +32,87 @@ Add to the config's `plugins` array:
 }
 ```
 
-Then skip to step 4.
+## 2. Mount the legacy plugin — one of three paths
 
-## 3. Route B — local
+| # | Path | Use when |
+|---|---|---|
+| 1 | `github:` (official / universal) | the plugin's source lives in a GitHub repo — online fetch |
+| 2 | `preset:rtk` (sample) | wiring the bundled RTK showcase |
+| 3 | local file (sample) | the plugin is a file on disk |
 
-```pwsh
-# 1. build the bridge
-cd <oc-bifrost checkout>; npm install; npm run build
+Pick exactly one per plugin. Npm/bare package specifiers are not supported yet — the bridge refuses
+them out loud.
 
-# 2. a configured local entry MUST be a directory (a file path is rejected)
-#    <config>/plugins/oc-bifrost/index.js
-#    <config>/plugins/oc-bifrost/package.json
+### Path 1 — `github:` (official / universal, online)
+
+`github:<owner>/<repo>[@<ref>][#<path>]` — e.g. `github:obra/superpowers`.
+
+- No `@<ref>` → the repository's default branch (resolved once, at first fetch).
+- No `#<path>` → `hooks/opencode/<repo>.ts`, `hooks/opencode/index.ts`, `plugin.ts`, and `index.ts`
+  are probed in order. Pass `#<path>` when the plugin lives elsewhere; a failed probe lists every
+  path it tried.
+- First load fetches once into `legacy/cache/<id>/` (under the session directory) and records the
+  sha256 — trust on first use. Later loads verify the cached bytes against that record with zero
+  network; a mismatch refuses loudly.
+
+**Consent gate — the first fetch is an explicit, informed opt-in.** The first fetch downloads a
+plugin file from GitHub and executes it with the host process's full user rights. Mounting by source
+is trusting the publisher; the recorded sha256 pins those bytes afterwards, it does not vouch for
+them. A cold cache refuses by default, before anything is fetched or executed, and names exactly
+what would be downloaded and both opt-ins:
+
+```text
+[oc-bifrost] refusing to fetch "github:obra/superpowers" (cold cache, first use): the first fetch would download one of, in order: hooks/opencode/superpowers.ts, hooks/opencode/index.ts, plugin.ts, index.ts from https://github.com/obra/superpowers at the repository's default branch (resolved at fetch time) and EXECUTE it with this host process's full user rights. First-use fetching is opt-in, per oc-bifrost entry: set options.trustRemote: true, or set the environment variable OC_BIFROST_TRUST=github. Nothing was fetched and nothing was executed. A warm (hash-verified) cache never needs this consent.
 ```
 
-`index.js`:
+- Opt in on the bridge entry, or via the environment:
 
-```js
-export { default } from "<absolute path to oc-bifrost>/dist/index.js"
+  ```jsonc
+  { "package": "@nathwn12/oc-bifrost", "options": { "trustRemote": true, "plugins": ["github:obra/superpowers"] } }
+  ```
+
+  `OC_BIFROST_TRUST=github` does the same from the environment; an explicit `trustRemote: false`
+  wins over it.
+- A warm, hash-verified cache needs no re-consent and no network.
+- The mount report always prints the resolved commit, the digest, and the host-rights line
+  (`…; executes with the host process's full user rights`) — the consent stays informed on every
+  load.
+- Offline or air-gapped: the cold-cache fetch fails closed —
+  `Cold-cache fetching is fail-closed — oc-bifrost never falls back to another source. If this machine
+  is offline or air-gapped, pre-warm the cache on a networked machine (run oc-bifrost once with
+  opt-in) and copy its legacy/cache directory across.`
+
+> **Version gate.** `github:` ships in 0.4.0 (this release). Earlier published releases (0.3.0 and
+> below) cannot mount it - on those, use path 2 or 3.
+
+### Path 2 — `preset:rtk` (sample, bundled, zero-fetch)
+
+`"plugins": ["preset:rtk"]` mounts the vendored `rtk-ai/rtk` plugin (`v0.50.0`, Apache-2.0).
+Nothing is fetched and nothing is parked.
+
+Prerequisite: the `rtk` binary (`>= 0.23.0`) on `PATH`. The preset probes before mounting and warns
+loudly if it is missing (`strict: true` aborts). Install the binary once:
+
+```sh
+winget install rtk-ai.rtk        # Windows
+brew install rtk                 # macOS / Linux
 ```
 
-`package.json`:
-
-```json
-{ "type": "module", "exports": { ".": "./index.js" } }
-```
-
-Config entry:
-
-```jsonc
-{
-  "plugins": [
-    {
-      "package": "<config>/plugins/oc-bifrost",
-      "options": { "plugins": ["<specifier for each legacy plugin>"] }
-    }
-  ]
-}
-```
-
-## 3b. Route C — preset (RTK, zero-fetch)
-
-For the bundled showcase there is nothing to fetch and nothing to park:
-
-```jsonc
-{
-  "plugins": [
-    { "package": "@nathwn12/oc-bifrost", "options": { "plugins": ["preset:rtk"] } }
-  ]
-}
-```
-
-`preset:rtk` mounts `vendor/rtk.ts` (verbatim upstream, pinned) and **probes for the `rtk` binary
-before mounting**. If the binary is absent it says so loudly and names the install command — it does
-not mount-and-do-nothing. `strict: true` turns that warning into an abort.
-
-The binary remains a separate install: `winget install rtk-ai.rtk` (Windows), `brew install rtk`
-(macOS/Linux), or the release zip from [`rtk-ai/rtk`](https://github.com/rtk-ai/rtk). Do **not**
+or take the release asset from [`rtk-ai/rtk`](https://github.com/rtk-ai/rtk/releases). Do **not**
 `cargo install rtk` — the crates.io crate of that name is a different project.
 
-## 4. Park the legacy plugins correctly
+Do **not** run `rtk init -g --opencode`: it writes `rtk.ts` into `<config>/plugins/`, a discovery
+directory (see step 3).
+
+### Path 3 — local file (sample)
+
+- Project install: `"plugins": ["./.opencode/legacy/<name>.ts"]` — a relative specifier resolves
+  against the **session directory**, so it works only in the project that owns the file.
+- Global install: park the file in `<config>/legacy/<name>.ts` and reference it by **absolute path**
+  — e.g. `C:/Users/you/.config/opencode/legacy/rtk.ts`, or `/home/you/.config/opencode/legacy/rtk.ts`
+  on macOS/Linux.
+
+## 3. Park the legacy plugins correctly
 
 **A V1 plugin left in `.opencode/plugins/` is hard-rejected by V2 before the bridge can see it:**
 
@@ -106,10 +120,11 @@ The binary remains a separate install: `winget install rtk-ai.rtk` (Windows), `b
 Plugin must export a default definition with an id and an effect or setup function
 ```
 
-Move it out of discovery — `.opencode/legacy/<name>.ts` is the convention — and reference it from `options.plugins`:
+Move it out of discovery — `legacy/` is the convention — and reference it from `options.plugins`:
 
-- relative specifiers resolve against the **session directory**
-- absolute paths and npm names work too
+- relative specifiers resolve against the **session directory** (project-local only)
+- absolute paths work everywhere; npm/bare names are refused (not supported yet)
+- the bridge warns at load when it finds a stranded V1 file in a discovery directory
 
 ### Global install (all projects)
 
@@ -126,7 +141,7 @@ The same rule applies with a sharper edge at the global config:
 > installer *breaks* the host instead of wiring the bridge. Park the file in `legacy/` and
 > reference it from `options.plugins` instead.
 
-## 5. Verify (do not skip — this is the deliverable)
+## 4. Verify (do not skip — this is the deliverable)
 
 1. Restart the host so the config reloads.
 2. Trigger one real tool call (any shell command is enough).
@@ -148,13 +163,14 @@ The same rule applies with a sharper edge at the global config:
 
 **Legend:** `full` = bridged with write-back · `partial` = bridged with a stated loss · `unsupported` = refused out loud (set `strict: true` to abort instead).
 
-## 6. Rollback (always know it)
+## 5. Rollback (always know it)
 
-Remove the bridge entry from `plugins` and restart. Nothing else was modified: the bridge owns no files outside its own directory and writes nothing to the host's state.
+Remove the bridge entry from `plugins` and restart. Delete `legacy/cache/` if a `github:` plugin was
+mounted. Nothing else was modified: the bridge writes nothing to the host's state.
 
-## 7. Report to the human
+## 6. Report to the human
 
-State: route used · config path touched · legacy plugin path · hooks mounted and their levels · the side effect you verified · anything `unsupported` the plugin depends on. If a hook the plugin needs is `unsupported`, say so plainly and do not claim success.
+State: path used (1, 2, or 3) · config path touched · legacy plugin path · hooks mounted and their levels · the side effect you verified · anything `unsupported` the plugin depends on. If a hook the plugin needs is `unsupported`, say so plainly and do not claim success.
 
 ---
 

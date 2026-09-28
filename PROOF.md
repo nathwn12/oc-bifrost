@@ -6,8 +6,12 @@ Verified end-to-end on an **isolated OpenCode V2 host**. Nothing in the operator
 |---|---|
 | Date | 2026-09-28 |
 | Host | OpenCode **2.0.18** (Windows, `opencode.exe`) |
-| oc-bifrost | 0.1.0 (`main @ 9561606`) |
+| oc-bifrost | Two builds — **0.1.0** (Proofs 1–4) and **0.2.0** (Proof 5); see each proof |
 | Node | 24.21.0 |
+
+> **Build scope (annotated 2026-09-28).** Proofs 1–3 were verified on `main @ 9561606` (0.1.0),
+> Proof 4 on the published `0.1.0` npm package, and Proof 5 on the packed `0.2.0` tarball. The repo
+> has since moved to `0.3.0` (`main @ 50284db`), and none of these proofs have been re-run there.
 
 ## Isolation method
 
@@ -29,6 +33,8 @@ The global harness (`~/.config/opencode`) was never loaded. The override was set
 
 ## Proof 1 — a V1 hook's mutation reaches real execution
 
+Verified build: `oc-bifrost@0.1.0` (`main @ 9561606`).
+
 A V1 plugin registered `tool.execute.before` and appended a marker to every shell command. The host's own log shows the **rewritten** command being spawned:
 
 ```
@@ -46,7 +52,9 @@ This proves the load-bearing write-back: V2 reads `event.input` and `event.tool`
 
 ## Proof 2 — a real npm V1 plugin works through the bridge
 
-Plugin: **`opencode-claude-hooks@0.1.0`** (unmodified, installed from npm). Its shape is textbook V1:
+Verified build: `oc-bifrost@0.1.0` (`main @ 9561606`).
+
+Plugin: **`opencode-claude-hooks@0.1.0`** (unmodified, npm-installed copy mounted by absolute path). Its shape is textbook V1 — all five registered hooks:
 
 ```js
 var ClaudeCodeHooksPlugin = async (input) => ({
@@ -54,6 +62,7 @@ var ClaudeCodeHooksPlugin = async (input) => ({
   "tool.execute.before": async (hookInput, output) => { ... },
   "tool.execute.after":  async (hookInput, output) => { ... },
   "permission.ask":      async (hookInput, output) => { ... },
+  "experimental.session.compacting": async (hookInput, output) => { ... },
 })
 export { ClaudeCodeHooksPlugin }
 ```
@@ -83,13 +92,21 @@ No `LoadError`. The V1 factory was discovered (`ClaudeCodeHooksPlugin`), called 
 
 ## Proof 3 — a real plugin fetched from GitHub loads
 
+Verified build: `oc-bifrost@0.1.0` (`main @ 9561606`).
+
 `rtk-ai/rtk` `hooks/opencode/rtk.ts` (verbatim from `develop`) — a V1 named export using `tool.execute.before` and the Bun `$` shell — was discovered and mounted by the bridge. With no `rtk` binary on `PATH` it self-disables at its own preflight, which is the plugin's behaviour, not the bridge's: discovery, context, and the `$` facade all worked.
 
 > **Correction (2026-09-28).** An earlier revision of this page blamed that preflight on Windows. That was wrong, and it sent a reader hunting a phantom platform bug. `which` resolves normally in the host's Bun shell on this machine — `C:\Program Files\Git\usr\bin\which.exe` is on `PATH` — and `$`which rtk`` succeeds the moment the binary exists. The sole cause was the missing binary. See **Proof 4**.
 
 ## Proof 4 — live, in the operator's real global config
 
+Verified build: `@nathwn12/oc-bifrost@0.1.0` from npm — the superseded legacy-file route.
+
 Not isolated. The operator's own `~/.config/opencode`, bridge installed as the published npm package, RTK parked in `<config>/legacy/rtk.ts`.
+
+> **Superseded route (annotated 2026-09-28).** `<config>/legacy/rtk.ts` was deliberately removed in
+> the 0.2.0 switch — do not expect it to exist today. The operator config now mounts `preset:rtk`,
+> the route Proof 5 exercises. This record is kept as the historical live-config proof.
 
 | Field | Value |
 |---|---|
@@ -122,19 +139,23 @@ Total commands:    1
  1.  rtk git status --porc...      1
 ```
 
-This is the strongest proof available here: not a side effect we inferred, but the host's own record of the command it executed.
+This is the strongest live-config proof to date: not a side effect we inferred, but the host's own record of the command it executed.
 
 ## Proof 5 — `preset:rtk` mounted from the PACKED TARBALL, in a real host
 
-The strongest proof in this file: it exercises the artifact a user actually installs, the
-zero-fetch preset path, the vendored `.ts` import under Bun, and the prerequisite probe.
+Verified build: `@nathwn12/oc-bifrost@0.2.0` — the packed tarball recorded below; not re-run on
+the current 0.3.0.
+
+The strongest proof in this file for the **0.2.0** build: it exercises the artifact that release
+shipped, the zero-fetch preset path, the vendored `.ts` import under Bun, and the prerequisite
+probe.
 
 Method — no network, no published version required:
 
 1. `npm pack` → `nathwn12-oc-bifrost-0.2.0.tgz`
 2. `npm install` that tarball into an isolated tree
 3. A directory-shim entry re-exporting the installed package's `dist/index.js`
-   (the shape [`README.md`](README.md) Route B documents), configured with **only**
+   (the host rejects a file path here), configured with **only**
    `"plugins": ["preset:rtk"]`
 4. A headless host with `OPENCODE_CONFIG_DIR` pointed at that sandbox config
 
@@ -178,7 +199,7 @@ A configured entry that points **directly at the installed package directory** i
 the host **silently** — no log, no warning, the plugin simply never loads. The package resolves
 correctly at every resolver we tested (`Bun.resolveSync`, `require.resolve`, `Host.resolve`'s
 own call), so the drop happens in the host's absolute-directory branch, not in this package.
-Use the documented shim (Route B) or the npm package name (Route A); both are proven.
+Use a directory shim or the npm package name; both are proven.
 
 
 A configured local plugin entry **must be a directory** in the tested host, not a file:
@@ -214,6 +235,7 @@ opencode run --auto --standalone --print-logs "Run this exact shell command: ech
 
 ## Honest scope of this proof
 
-- Proven: discovery, V1 context facade, `$` shell, `tool.execute.before` write-back to execution, `tool.execute.after`, and refusal reporting.
+- Proven in the host runs: discovery, V1 context facade, `$` shell, and `tool.execute.before` write-back to execution.
+- Proven by the test suite, not by a host run here: `tool.execute.after` and refusal reporting (`test/hooks.test.js`; `test/matrix.test.js`).
 - Not proven here: the `partial` and `unsupported` rows of the matrix under load, and behaviour on Linux/macOS.
 - One host, one version (2.0.18). Re-run on each OpenCode release before trusting it there.

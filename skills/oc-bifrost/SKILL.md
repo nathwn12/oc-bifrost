@@ -20,9 +20,18 @@ Plugin must export a default definition with an id and an effect or setup functi
 1. `opencode --version` → must be `2.x`.
 2. `opencode debug paths` → read the `config` line. **Use that path.** Never assume `~/.config/opencode`.
 3. Move the legacy plugin out of any discovered plugin directory — `.opencode/legacy/<name>.ts`. A V1 file left in `.opencode/plugins/` is rejected before the bridge can see it.
-4. Add the bridge to the config's `plugins` array:
-   - published package: `{ "package": "@nathwn12/oc-bifrost", "options": { "plugins": ["<specifier>"] } }`
-   - local: a **directory** entry (`index.js` + `package.json`) — the host rejects file paths with `configured plugin path must be a directory`.
+4. Add the bridge to the config's `plugins` array — one entry; OpenCode resolves the package, no `npm i`:
+   `{ "package": "@nathwn12/oc-bifrost", "options": { "plugins": ["<one specifier>"] } }`
+   The specifier is exactly one of three paths:
+   - `github:<owner>/<repo>[@<ref>][#<path>]` — official, by source (needs oc-bifrost from `main` / 0.4.0+).
+     The first fetch downloads a plugin from GitHub and EXECUTES it with the host process's full user
+     rights — by source means trusting the publisher. A cold cache refuses by default and names both
+     opt-ins: `"trustRemote": true` on the bridge entry, or `OC_BIFROST_TRUST=github` in the
+     environment. A warm, hash-verified cache then loads with no re-consent and no network; the mount
+     report always prints the resolved commit, the digest, and the host-rights line. An offline cold
+     cache fails closed and names the pre-warm path.
+   - `preset:rtk` — the bundled showcase (needs the `rtk` binary on `PATH`)
+   - a local path — `./.opencode/legacy/<name>.ts` (project) or an absolute path (global)
 5. Restart. Confirm `loading plugin` with no `LoadError`, and read the printed report.
 6. Verify with a **side effect**, not the report: trigger one real tool call and assert the plugin's observable behaviour actually happened.
 
@@ -37,5 +46,7 @@ If the plugin depends on an `unsupported` hook, report it as a **port candidate*
 ## Guardrails
 
 - Config edits may be owned by another writer agent — delegate on the first denial; never route around it.
+- Never silently enable `trustRemote` for a `github:` plugin: it executes publisher code with the
+  host process's full user rights. Surface that decision to the human.
 - Never permanently change the host environment to make a test pass.
 - For any read of the OpenCode source, cite `file:line`.

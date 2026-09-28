@@ -6,9 +6,7 @@
 
 **The rainbow bridge for OpenCode plugins.** Run V1-era plugin hooks on the OpenCode **V2** runtime.
 
-```sh
-npm i @nathwn12/oc-bifrost
-```
+**[Install](#install)** — one config entry; name each legacy plugin one of three ways: `github:` source, the bundled `preset:rtk`, or a local file.
 
 OpenCode V2 intentionally broke the plugin API — a V1 plugin module is now hard-rejected at load:
 
@@ -19,146 +17,78 @@ Most plugins never got ported. `oc-bifrost` is one small plugin that loads them 
 
 ## Install
 
-### Package (recommended)
+The bridge is one entry in the `plugins` array of your OpenCode config — OpenCode resolves the package itself, so there is no separate install step. Then name each legacy plugin with **exactly one** of these three specifiers:
 
-```sh
-npm i @nathwn12/oc-bifrost
-```
+### 1. Official / universal — mount by source (`github:`)
+
+Point the bridge at the plugin's GitHub source — and consent to the first fetch in the same entry:
 
 ```jsonc
 {
-  "plugins": [
-    {
-      "package": "@nathwn12/oc-bifrost",
-      "options": {
-        "plugins": ["./.opencode/legacy/rtk.ts"],
-        "strict": false,
-        "verbose": true
-      }
-    }
-  ]
+  "package": "@nathwn12/oc-bifrost",
+  "options": {
+    "trustRemote": true, // consent: the first `github:` fetch downloads and executes a remote plugin
+    "plugins": ["github:obra/superpowers"]
+  }
 }
 ```
 
-> **Never leave a V1 plugin inside `.opencode/plugins/`.** V2 rejects it there with
-> `Plugin must export a default definition with an id and an effect or setup function` before
-> oc-bifrost can see it. Park legacy files in `.opencode/legacy/`.
+Form: `github:<owner>/<repo>[@<ref>][#<path>]`
 
-### Local (pinned checkout, or offline)
+- No `@<ref>` → the repository's default branch, resolved once at first fetch.
+- No `#<path>` → `hooks/opencode/<repo>.ts`, `hooks/opencode/index.ts`, `plugin.ts`, and `index.ts` are probed in order; if none exists, the refusal lists every path it tried.
+- The first load fetches the file once into `legacy/cache/<id>/` (under the session directory) and records its sha256 — trust on first use. Every later load verifies the cached bytes against that record: zero network, and a mismatch refuses loudly instead of running unverified bytes.
 
-A configured local plugin entry **must be a directory**, not a file — the host rejects a file with
-`configured plugin path must be a directory`. Use a directory containing an `index.js` that
-re-exports the built plugin:
+**Trust model — the first fetch is an explicit, informed opt-in.** The first fetch downloads a plugin file from GitHub and **executes it in the host process, with the same rights you have**. Mounting a plugin by source is trusting its publisher: the sha256 recorded on first use pins those exact bytes afterwards — it does not vouch for them. A cold cache therefore refuses by default, before anything is fetched or executed, naming exactly what would be downloaded and both opt-ins:
 
 ```text
-<config>/plugins/oc-bifrost/
-├── index.js        export { default } from "<repo>/dist/index.js"
-└── package.json    { "type": "module", "exports": { ".": "./index.js" } }
+[oc-bifrost] refusing to fetch "github:obra/superpowers" (cold cache, first use): the first fetch would download one of, in order: hooks/opencode/superpowers.ts, hooks/opencode/index.ts, plugin.ts, index.ts from https://github.com/obra/superpowers at the repository's default branch (resolved at fetch time) and EXECUTE it with this host process's full user rights. First-use fetching is opt-in, per oc-bifrost entry: set options.trustRemote: true, or set the environment variable OC_BIFROST_TRUST=github. Nothing was fetched and nothing was executed. A warm (hash-verified) cache never needs this consent.
 ```
+
+- **Consent once** — `"trustRemote": true` on the bridge entry, or `OC_BIFROST_TRUST=github` in the environment (an explicit `trustRemote: false` wins over the environment variable). It governs the first fetch only: a warm, hash-verified cache loads with **no re-consent and no network**.
+- **The mount report keeps the consent informed** — it always prints the resolved commit, the digest, and the host-rights line: `fetched github:obra/superpowers@<ref>#<path> at commit <commit-sha> (sha256 <digest>…, <bytes> bytes; trust-on-first-use); executes with the host process's full user rights` on a first fetch, and `loaded from cache (commit <commit-sha>, sha256 <digest>… verified; fetched <time>); executes with the host process's full user rights` afterwards.
+- **Offline or air-gapped** — the cold-cache fetch fails closed: `Cold-cache fetching is fail-closed — oc-bifrost never falls back to another source. If this machine is offline or air-gapped, pre-warm the cache on a networked machine (run oc-bifrost once with opt-in) and copy its legacy/cache directory across.`
+
+> **Version gate.** `github:` ships in **0.4.0** (this release). Earlier published releases (0.3.0 and below) cannot mount `github:` specifiers - on those, use one of the two samples below.
+
+### 2. Sample — `preset:rtk` (bundled, zero-fetch)
 
 ```jsonc
-{
-  "plugins": [
-    {
-      "package": "<config>/plugins/oc-bifrost",
-      "options": {
-        "plugins": ["./.opencode/legacy/rtk.ts"],
-        "strict": false,
-        "verbose": true
-      }
-    }
-  ]
-}
+{ "package": "@nathwn12/oc-bifrost", "options": { "plugins": ["preset:rtk"] } }
 ```
 
-See [`PROOF.md`](PROOF.md) for a verified isolated run — and Proof 4 there for a **live** global install.
+RTK is the showcase: a real, unmodified V1 plugin whose effect you can watch. The plugin file is **bundled** — `vendor/rtk.ts`, verbatim `rtk-ai/rtk` `v0.50.0` (Apache-2.0) — so nothing is fetched at install time. It is opt-in: nothing from RTK runs unless you ask for `preset:rtk`.
 
-### Global install (all projects)
-
-Installing into `~/.config/opencode` adds two rules, and both bite **silently**:
-
-- **Use an absolute path.** oc-bifrost resolves a relative specifier against the *session*
-  directory, so `./.opencode/legacy/rtk.ts` works only in the one project that owns that file.
-  Anywhere else the import fails and the plugin is skipped with a warning.
-- **Never park the legacy file in `<config>/plugin/` or `<config>/plugins/`.** Both are
-  auto-discovery directories; a bare `.ts` there is loaded directly and hard-rejected before
-  oc-bifrost can see it. Use `<config>/legacy/`.
-
-```jsonc
-{
-  "plugins": [
-    {
-      "package": "@nathwn12/oc-bifrost",
-      "options": { "plugins": ["C:/Users/you/.config/opencode/legacy/rtk.ts"] }
-    }
-  ]
-}
-```
-
-> **Known landmine.** Some plugins ship an installer that writes straight into a discovery
-> directory: `rtk init -g --opencode` targets `~/.config/opencode/plugins/rtk.ts`, which
-> *breaks* the host instead of wiring the bridge. Park the file in `legacy/` yourself and
-> reference it from `options.plugins`.
-
-### The plugin's own prerequisites are still yours
-
-oc-bifrost bridges **hooks**, not a plugin's external dependencies. If a plugin shells out to a
-binary, that binary must exist on `PATH` or the plugin will disable itself — correctly, and
-usually quietly.
-
-RTK is the worked example; it needs `rtk >= 0.23.0`:
+**Prerequisite: the `rtk` binary (`>= 0.23.0`) must be on `PATH`.** `preset:rtk` probes before mounting and names this command if it is missing:
 
 ```sh
 winget install rtk-ai.rtk        # Windows
 brew install rtk                 # macOS / Linux
 ```
 
-No winget? Take the `rtk-x86_64-pc-windows-msvc.zip` asset from
-[`rtk-ai/rtk` releases](https://github.com/rtk-ai/rtk/releases) and check it against the
-published digest.
+No winget? Take the release asset from [`rtk-ai/rtk`](https://github.com/rtk-ai/rtk/releases) instead. Not from crates.io: `cargo install rtk` installs a different project.
 
-> ⚠️ **Name collision.** The crates.io crate `rtk` is a *different project* ("Rust Type Kit"),
-> and so is `rtk-cli`. `cargo install rtk` gives you the wrong binary. Install from
-> `rtk-ai/rtk` only.
+Then a shell command like `git status` executes as `rtk git status`. Live evidence: [`PROOF.md`](PROOF.md) Proof 4 and [`VERIFIED-PLUGINS.md`](VERIFIED-PLUGINS.md).
 
-### First proof: mount RTK with one line
+> ⚠️ **Do not run `rtk init -g --opencode`.** Upstream writes `rtk.ts` into `~/.config/opencode/plugins/` — a discovery directory where V2 hard-rejects V1 modules. `preset:rtk` exists precisely so you never touch that path.
 
-RTK is the bridge's showcase — a real, unmodified V1 plugin whose effect you can *watch*.
+### 3. Sample — a local file
+
+For a plugin you have on disk. A relative specifier resolves against the **session directory**, so it works only in the one project that owns the file:
 
 ```jsonc
-{
-  "plugins": [
-    { "package": "@nathwn12/oc-bifrost", "options": { "plugins": ["preset:rtk"] } }
-  ]
-}
+{ "package": "@nathwn12/oc-bifrost", "options": { "plugins": ["./.opencode/legacy/my-plugin.ts"] } }
 ```
 
-The plugin file is **bundled** — `vendor/rtk.ts`, verbatim `rtk-ai/rtk` `v0.50.0` (Apache-2.0) — so
-nothing is fetched at install time. Two things make it an honest demo:
+A global install (all projects) parks the file outside every discovery directory and uses an absolute path:
 
-- **The prerequisite is checked, loudly.** RTK's plugin self-disables when the `rtk` binary is
-  absent. `preset:rtk` probes for it *before* mounting and names the exact install command if it is
-  missing, instead of mounting and silently rewriting nothing.
-- **It is opt-in.** Nothing from RTK runs unless you ask for `preset:rtk`.
-
-You still need the binary — the bridge bridges **hooks**, not binaries:
-
-```sh
-winget install rtk-ai.rtk        # Windows
-brew install rtk                 # macOS / Linux
+```jsonc
+{ "package": "@nathwn12/oc-bifrost", "options": { "plugins": ["C:/Users/you/.config/opencode/legacy/my-plugin.ts"] } }
 ```
 
-Then a shell command like `git status` executes as `rtk git status`. Live evidence:
-[`PROOF.md`](PROOF.md) Proof 4 and [`VERIFIED-PLUGINS.md`](VERIFIED-PLUGINS.md).
+> **Never leave a V1 plugin inside a discovery directory** — `.opencode/plugin/`, `.opencode/plugins/`, and the global `<config>/plugin/`, `<config>/plugins/`. V2 loads those directly and hard-rejects the module before oc-bifrost can see it (`Plugin must export a default definition with an id and an effect or setup function`). Park legacy files in `legacy/`; the bridge also warns at load if it finds one stranded.
 
-> ⚠️ **Do not run `rtk init -g --opencode`.** Upstream installs to
-> `~/.config/opencode/plugins/rtk.ts` — a discovery directory where V2 hard-rejects V1 modules.
-> `preset:rtk` exists precisely so you never touch that path.
-
-> ⚠️ **A directory entry must be the documented shim, not the installed package directory.**
-> Pointing `package` straight at `node_modules/@nathwn12/oc-bifrost` is dropped by the host
-> **silently** — no error, the plugin just never loads. Use the npm package name (Route A above)
-> or the shim directory shown in Route B. Both are proven in [`PROOF.md`](PROOF.md).
+oc-bifrost bridges **hooks**, not a plugin's external dependencies. If a plugin shells out to a binary, that binary must exist on `PATH` or the plugin disables itself — correctly, and usually quietly. RTK above is the worked example.
 
 ## Staying fresh
 
@@ -180,16 +110,12 @@ Optionally, you can ask the bridge to compare that pin against upstream's latest
   network cannot delay or break a mount; the notice may appear shortly after the mount report.
   Being offline, rate-limited, or otherwise unable to check reports `unknown` (informational), not
   an error, so an offline machine stays quiet.
-- When it reports **behind**, update along one of two paths:
-
-  ```sh
-  npm i @nathwn12/oc-bifrost@latest   # an installed copy
-  npm run vendor:update               # a source checkout (offline: --from-file)
-  ```
-
-  A source checkout can preview and validate first: `npm run vendor:update -- --dry-run`. The
-  updater rewrites every copy of the pin and runs the full check; if the check fails it prints the
-  exact revert.
+- When it reports **behind**, the vendored copy is older than upstream's latest release:
+  - an OpenCode-installed bridge: OpenCode tracks plugin package versions and offers the update in
+    its `Plugins` list (`update available`).
+  - a source checkout: `npm run vendor:update` (preview with `--dry-run`; offline: `--from-file`).
+    The updater rewrites every copy of the pin and runs the full check; if the check fails it prints
+    the exact revert.
 
 ## Let your agent set it up
 
@@ -197,11 +123,11 @@ This is an **agent-first** repo. You do not have to read the install steps — t
 
 > *"Set up oc-bifrost for my legacy plugin at `.opencode/legacy/rtk.ts`."*
 
-Your agent follows [`INSTALL.md`](INSTALL.md), picks the npm or local route, parks the legacy plugin
+Your agent follows [`INSTALL.md`](INSTALL.md), picks one of the three paths, parks the legacy plugin
 where V2 will not reject it, and proves it with a side effect before reporting. A drop-in skill is
 included at [`skills/oc-bifrost/SKILL.md`](skills/oc-bifrost/SKILL.md).
 
-Prefer to do it yourself? Read [`INSTALL.md`](INSTALL.md) — Route B is the local route.
+Prefer to do it yourself? Read [`INSTALL.md`](INSTALL.md).
 
 ## What it does
 
@@ -214,6 +140,8 @@ It hands V1 plugins a faithful-enough `PluginInput`: `directory`, `project`, a `
 ## Compatibility matrix
 
 The unit of compatibility is the **V1 hook**, not the plugin. Once a hook is bridged, every plugin that uses it works untouched.
+
+**5 🟢 full · 9 🟡 partial · 7 🔴 refused** — all 21 V1 hooks:
 
 | V1 hook | Level | V2 destination |
 |---|---|---|
@@ -243,13 +171,17 @@ The unit of compatibility is the **V1 hook**, not the plugin. Once a hook is bri
 
 ## Honest bounds
 
-This bridges **the mappable subset**, not "any plugin, seamlessly." Three V1 hooks have no V2 destination — no compatibility layer can invent one. Plugins that depend on those need a real port. The refusal list is the product being honest, and it is the contract.
+This bridges **the mappable subset**, not "any plugin, seamlessly." Seven of the twenty-one V1 hooks
+are refused out loud: no faithful V2 destination exists for their semantics, and no compatibility
+layer can invent one. Plugins that depend on those need a real port. The refusal list is the product
+being honest, and it is the contract.
 
 ## Options
 
 | Option | Type | Default | Meaning |
 |---|---|---|---|
-| `plugins` | `Array<string \| { spec, options }>` | `[]` | Modules to bridge |
+| `plugins` | `Array<string \| { spec, options }>` | `[]` | Plugin specifiers to bridge — `github:`, `preset:`, or a local path |
+| `trustRemote` | `boolean` | `false` | Consent to fetch + execute a `github:` plugin on a cold cache — see the trust model above |
 | `strict` | `boolean` | `false` | Abort setup on an unsupported hook |
 | `verbose` | `boolean` | `true` | Print the per-plugin compatibility report |
 | `freshness` | `"off" \| "online"` | `"off"` | Check the bundled pin against upstream's latest release after mounting |

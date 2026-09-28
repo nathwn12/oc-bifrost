@@ -33,6 +33,16 @@ export interface BifrostOptions {
    * environment variable.
    */
   freshness?: "off" | "online"
+  /**
+   * Explicit informed consent for `github:` specs to fetch and execute remote
+   * code on FIRST use. A cold cache refuses to fetch unless this is true or
+   * the environment sets `OC_BIFROST_TRUST=github`; an explicit `false` wins
+   * over the env var. A warm (hash-verified) cache loads without consent —
+   * the opt-in is about the first fetch, not every mount. The refusal names
+   * what would be fetched and that it executes with the host process's full
+   * user rights.
+   */
+  trustRemote?: boolean
 }
 
 export type SupportLevel = "full" | "partial" | "unsupported" | "mounted"

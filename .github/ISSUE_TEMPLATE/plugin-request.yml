@@ -1,7 +1,6 @@
 name: Plugin request
 description: Request support for a plugin that does not work through oc-bifrost yet.
 title: "[plugin] "
-labels: ["plugin-request"]
 body:
   - type: input
     id: plugin

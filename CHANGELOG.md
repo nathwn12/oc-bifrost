@@ -1,6 +1,47 @@
 # Changelog
 
-## Unreleased
+## 0.4.0
+
+### Added
+
+- **`github:` - mount a V1 plugin BY SOURCE, not only from a local copy.** A plugin can now be
+  named from its repository instead of from a path on disk:
+
+  ```
+  github:obra/superpowers
+  github:rtk-ai/rtk@v0.50.0#hooks/opencode/rtk.ts
+  ```
+
+  The spec is `github:<owner>/<repo>[@<ref>][#<path>]`. The ref is resolved to a commit sha at
+  first fetch and the bytes are downloaded **by that commit, never by the ref**, so a ref that
+  moves cannot produce a `meta.json`/bytes disagreement. The verified artifact is written under
+  `legacy/cache/<safe-id>/` with its `meta.json` beside it, and later mounts load from there with
+  **zero network**. A cached artifact is never silently replaced because a ref moved; deleting the
+  cache directory is the documented refresh.
+- **A consent gate on the first fetch.** A cold cache **refuses** to fetch and execute unless you
+  opted in for that oc-bifrost entry (`trustRemote: true`) or in the environment
+  (`OC_BIFROST_TRUST=github`). The refusal names exactly what would be downloaded, that it would run
+  with the host process's full user rights, and both exact opt-ins. This is trust-on-first-use as a
+  human decision, never a silent default. A warm, hash-verified cache mounts with **no consent and
+  no network**: the opt-in is about the first fetch, not about every mount.
+
+### Changed
+
+- **The install docs now name exactly three paths, in order: by source (above) first, then
+  `preset:rtk`, then a local file.** A local copy is the last resort, not the advertised path.
+
+### Security
+
+- Cache writes go through one shared boundary (`validateCachePath`) that runs before **any** fetch
+  or write: root and entry must each be absent or a real directory - never a symlink - and
+  realpath-contained. Writes are temp+rename with restrictive modes and roll back on failure,
+  leaving no partial file and no temp leftover. A partial cache refuses rather than re-fetching.
+- Remote bodies are read incrementally under a size cap and are never dumped into a message.
+  Refusals are sanitized: control characters from specs, URLs, or remote responses are escaped
+  before they reach a message.
+- **Stated limit, not a hidden one:** the sha256 in `meta.json` sits beside the file it pins, so it
+  detects corruption and accidental drift and **cannot** defend against an attacker who already has
+  the user's own rights. The docs say so where the check is described.
 
 ### Fixed
 
@@ -8,6 +49,9 @@
   rewrites `src/preset.ts`, which is not part of the published package, so running it from inside
   `node_modules` previously failed with a bare `ENOENT`. The message now names the cause and the fix,
   and `vendor/README.md` states the source-checkout requirement before the command list.
+- **Six published claims that the code did not back are corrected or removed**, including a
+  verification row with no test behind it, a hook count that was off by one, and wording that
+  implied a registry mount could do what only a source mount does.
 
 ## 0.3.0
 

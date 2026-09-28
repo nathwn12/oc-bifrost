@@ -1,6 +1,6 @@
 {
   "name": "@nathwn12/oc-bifrost",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "description": "The rainbow bridge for OpenCode plugins — run V1-era plugin hooks on the OpenCode V2 runtime, seamlessly.",
   "keywords": [
     "opencode",
@@ -37,13 +37,15 @@
     "PROOF.md",
     "VERIFIED-PLUGINS.md",
     "CONTRIBUTING.md",
-    "skills"
+    "skills",
+    "scripts"
   ],
   "scripts": {
     "build": "tsc -p tsconfig.json",
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "test": "node --test test/*.test.js",
     "check": "npm run typecheck && npm run build && npm run test",
+    "vendor:update": "node scripts/vendor-update.mjs",
     "prepublishOnly": "npm run check"
   },
   "peerDependencies": {

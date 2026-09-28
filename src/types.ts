@@ -23,6 +23,16 @@ export interface BifrostOptions {
   strict?: boolean
   /** Emit a compatibility report to the console on load. Defaults to true. */
   verbose?: boolean
+  /**
+   * Whether to check the bundled preset against upstream's latest release after
+   * it mounts. `"online"` opts in; `"off"` (the default) is fully offline. The
+   * check is fired off the plugin-load path — not awaited during `setup` — and
+   * runs only after the mount has succeeded and been recorded, so it cannot
+   * delay or break the mount; the notice may appear shortly after the mount
+   * report. An explicit value here wins over the `OC_BIFROST_FRESHNESS`
+   * environment variable.
+   */
+  freshness?: "off" | "online"
 }
 
 export type SupportLevel = "full" | "partial" | "unsupported" | "mounted"

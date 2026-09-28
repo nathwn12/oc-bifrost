@@ -1,5 +1,43 @@
 # Changelog
 
+## 0.3.0
+
+### Added
+
+- **Freshness notice — the pin can no longer go stale silently.** The mount report always names
+  the pinned upstream version (offline, zero network). An **opt-in** check
+  (`freshness: "online"`, or `OC_BIFROST_FRESHNESS=online`) compares that pin against the latest
+  upstream release and warns, with both update paths, when the vendored copy is behind.
+- **`npm run vendor:update`** — one command to refresh the vendored RTK plugin and every copy of
+  its pin: it downloads (or takes `--from-file` for offline/CI), **verifies the bytes against an
+  independent record** — GitHub's own blob id on the network path, or a caller-supplied
+  `--expect-sha256` / `--expect-blob` offline (a real offline run refuses to write without one) —
+  rewrites `vendor/rtk.ts`, `vendor/rtk.meta.json`, the table in `vendor/README.md`, and the
+  version in `src/preset.ts`, then runs the full check. `--dry-run` previews without writing; a
+  failed check prints the exact revert. Refs are validated and inserted literally, so a hostile
+  tag cannot corrupt the pin.
+- **`vendor/rtk.meta.json`** — machine-readable provenance (sha256, git blob, bytes, ref,
+  license, upstream).
+- **A provenance drift guard** (`test/provenance.test.js`) — recomputes the hashes from the real
+  vendored bytes and fails if the three copies of the pin disagree.
+
+### Changed
+
+- `PRESETS`, `compareTags`, `pinnedNote`, `freshnessEnabled`, and `checkFreshness` are exported
+  from the package root.
+- `package.json` now ships `scripts/` so the provenance tooling is auditable in the tarball.
+
+### Security
+
+- **Runtime auto-fetch was REFUSED, deliberately.** Fetching the upstream plugin at install or
+  load time would execute unverified remote code, would silently break the recorded provenance
+  (the sha256 / git blob / license that make the vendored copy auditable), and would break offline
+  installs. The freshness check is therefore a comparison only — it downloads and runs no plugin
+  code — and is **off by default**; updating stays a deliberate, human-run, verified step.
+- No new dependencies, runtime or dev. The freshness check uses only `globalThis.fetch` and
+  `AbortSignal.timeout`, never throws, and reports `unknown` (informational, not a warning) on any
+  failure — an offline machine is not an error.
+
 ## 0.2.0
 
 ### Added

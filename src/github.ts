@@ -40,10 +40,11 @@
  *     specs, URLs, or remote responses are escaped before they reach a
  *     message, and a remote body is never dumped.
  *
- * The cache lives under the session's location directory — the same directory
- * that hosts the config which named this plugin (`legacy/cache/<safe-id>/`).
- * The safe id is filesystem-safe and derived only from the normalized spec;
- * no host path ever flows into it.
+ * The cache lives in the OpenCode user's shared cache directory
+ * (`<XDG_CACHE_HOME>/opencode/oc-bifrost/github/<safe-id>/`, defaulting to
+ * `~/.cache/opencode/oc-bifrost/github/<safe-id>/`). It is independent of the
+ * project location. The safe id is filesystem-safe and derived only from the
+ * normalized spec; no host path ever flows into it.
  *
  * Zero runtime dependencies: plain `globalThis.fetch`, node builtins only.
  */
@@ -385,8 +386,8 @@ function offlineMessage(what: string, error: unknown): string {
   return (
     `[oc-bifrost] ${what} (${safe(error instanceof Error ? error.message : String(error))}). ` +
     `Cold-cache fetching is fail-closed — oc-bifrost never falls back to another source. ` +
-    `If this machine is offline or air-gapped, pre-warm the cache on a networked machine (run oc-bifrost once with opt-in) ` +
-    `and copy its legacy/cache directory across.`
+    `If this machine is offline or air-gapped, pre-warm the shared cache on a networked machine (run oc-bifrost once with opt-in) ` +
+    `and copy its oc-bifrost/github cache directory across.`
   )
 }
 

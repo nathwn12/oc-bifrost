@@ -21,7 +21,7 @@ package itself — there is no separate `npm i` step:
 {
   "plugins": [
     {
-      "package": "@nathwn12/oc-bifrost@1.0.0",
+      "package": "@nathwn12/oc-bifrost@1.0.1",
       "options": {
         "plugins": ["<exactly one specifier — one of the three paths below>"],
         "strict": false,
@@ -34,7 +34,7 @@ package itself — there is no separate `npm i` step:
 
 ### 1a. Choose the version form — then verify what resolved
 
-**Pin an exact version:** `"@nathwn12/oc-bifrost@1.0.0"` — the default and the version this page
+**Pin an exact version:** `"@nathwn12/oc-bifrost@1.0.1"` — the default and the version this page
 describes. `@^1.0.0` tracks 1.x and never adopts a new major silently. A bare `@nathwn12/oc-bifrost` or
 `@latest` may be unstable while OpenCode's plugin cache settles. State the form you used in your report.
 
@@ -67,9 +67,11 @@ them out loud.
 - No `#<path>` → `hooks/opencode/<repo>.ts`, `hooks/opencode/index.ts`, `plugin.ts`, and `index.ts`
   are probed in order. Pass `#<path>` when the plugin lives elsewhere; a failed probe lists every
   path it tried.
-- First load fetches once into `legacy/cache/<id>/` (under the session directory) and records the
-  sha256 — trust on first use. Later loads verify the cached bytes against that record with zero
-  network; a mismatch refuses loudly.
+- First load fetches once into the shared user cache at
+  `$XDG_CACHE_HOME/opencode/oc-bifrost/github/<id>/` (default:
+  `~/.cache/opencode/oc-bifrost/github/<id>/`) and records the sha256 — trust on first use.
+  Later loads from any project verify the cached bytes against that record with zero network;
+  a mismatch refuses loudly.
 
 **Consent gate — the first fetch is an explicit, informed opt-in.** The first fetch downloads a
 plugin file from GitHub and executes it with the host process's full user rights. Mounting by source
@@ -84,7 +86,7 @@ what would be downloaded and both opt-ins:
 - Opt in on the bridge entry, or via the environment:
 
   ```jsonc
-  { "package": "@nathwn12/oc-bifrost@1.0.0", "options": { "trustRemote": true, "plugins": ["github:obra/superpowers"] } }
+  { "package": "@nathwn12/oc-bifrost@1.0.1", "options": { "trustRemote": true, "plugins": ["github:obra/superpowers"] } }
   ```
 
   `OC_BIFROST_TRUST=github` does the same from the environment; an explicit `trustRemote: false`
@@ -96,7 +98,7 @@ what would be downloaded and both opt-ins:
 - Offline or air-gapped: the cold-cache fetch fails closed —
   `Cold-cache fetching is fail-closed — oc-bifrost never falls back to another source. If this machine
   is offline or air-gapped, pre-warm the cache on a networked machine (run oc-bifrost once with
-  opt-in) and copy its legacy/cache directory across.`
+  opt-in) and copy its shared `oc-bifrost/github` cache directory across.`
 
 > **Version gate.** `github:` requires **oc-bifrost 0.4.0 or later**; releases **0.3.0 and below**
 > cannot mount it — on those, use path 2 (offline fallback) or path 3.
@@ -181,8 +183,10 @@ The same rule applies with a sharper edge at the global config:
 
 ## 5. Rollback (always know it)
 
-Remove the bridge entry from `plugins` and restart. Delete `legacy/cache/` if a `github:` plugin was
-mounted. Nothing else was modified: the bridge writes nothing to the host's state.
+Remove the bridge entry from `plugins` and restart. Delete the corresponding entry under
+`$XDG_CACHE_HOME/opencode/oc-bifrost/github/` (default `~/.cache/opencode/oc-bifrost/github/`)
+if you want to remove a downloaded `github:` plugin. Nothing else was modified: the bridge writes
+no state to the project.
 
 ## 6. Report to the human
 

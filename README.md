@@ -9,22 +9,65 @@ OpenCode V2 intentionally broke the plugin API — a V1 plugin module is now har
 
 Most plugins never got ported. `oc-bifrost` is one small plugin that loads them anyway, translates their V1 hooks onto V2 registration calls, and tells you exactly what it could not bridge.
 
+## Install
+
+### Local (before the package is published)
+
+A configured local plugin entry **must be a directory**, not a file — the host rejects a file with
+`configured plugin path must be a directory`. Use a directory containing an `index.js` that
+re-exports the built plugin:
+
+```text
+<config>/plugins/oc-bifrost/
+├── index.js        export { default } from "<repo>/dist/index.js"
+└── package.json    { "type": "module", "exports": { ".": "./index.js" } }
+```
+
 ```jsonc
-// opencode.jsonc
 {
   "plugins": [
     {
-      "package": "@nathwn12/oc-bifrost",
+      "package": "<config>/plugins/oc-bifrost",
       "options": {
-        "plugins": [
-          "./legacy/rtk.ts",
-          { "spec": "./legacy/graphify-nudge.ts" }
-        ]
+        "plugins": ["./.opencode/legacy/rtk.ts"],
+        "strict": false,
+        "verbose": true
       }
     }
   ]
 }
 ```
+
+> **Never leave a V1 plugin inside `.opencode/plugins/`.** V2 rejects it there with
+> `Plugin must export a default definition with an id and an effect or setup function` before
+> oc-bifrost can see it. Park legacy files in `.opencode/legacy/`.
+
+### Package (after publish)
+
+```jsonc
+{
+  "plugins": [
+    {
+      "package": "@nathwn12/oc-bifrost",
+      "options": { "plugins": ["./.opencode/legacy/rtk.ts"] }
+    }
+  ]
+}
+```
+
+See [`PROOF.md`](PROOF.md) for a verified isolated run.
+
+## Let your agent set it up
+
+This is an **agent-first** repo. You do not have to read the install steps — tell your agent:
+
+> *"Set up oc-bifrost for my legacy plugin at `.opencode/legacy/rtk.ts`."*
+
+Your agent follows [`INSTALL.md`](INSTALL.md), picks the npm or local route, parks the legacy plugin
+where V2 will not reject it, and proves it with a side effect before reporting. A drop-in skill is
+included at [`skills/oc-bifrost/SKILL.md`](skills/oc-bifrost/SKILL.md).
+
+Prefer to do it yourself? Read [`INSTALL.md`](INSTALL.md) — Route B is the local route.
 
 ## What it does
 

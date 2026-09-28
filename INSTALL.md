@@ -78,6 +78,26 @@ Config entry:
 }
 ```
 
+## 3b. Route C — preset (RTK, zero-fetch)
+
+For the bundled showcase there is nothing to fetch and nothing to park:
+
+```jsonc
+{
+  "plugins": [
+    { "package": "@nathwn12/oc-bifrost", "options": { "plugins": ["preset:rtk"] } }
+  ]
+}
+```
+
+`preset:rtk` mounts `vendor/rtk.ts` (verbatim upstream, pinned) and **probes for the `rtk` binary
+before mounting**. If the binary is absent it says so loudly and names the install command — it does
+not mount-and-do-nothing. `strict: true` turns that warning into an abort.
+
+The binary remains a separate install: `winget install rtk-ai.rtk` (Windows), `brew install rtk`
+(macOS/Linux), or the release zip from [`rtk-ai/rtk`](https://github.com/rtk-ai/rtk). Do **not**
+`cargo install rtk` — the crates.io crate of that name is a different project.
+
 ## 4. Park the legacy plugins correctly
 
 **A V1 plugin left in `.opencode/plugins/` is hard-rejected by V2 before the bridge can see it:**

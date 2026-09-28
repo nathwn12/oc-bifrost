@@ -36,14 +36,14 @@ package itself — there is no separate `npm i` step:
 
 | # | Path | Use when |
 |---|---|---|
-| 1 | `github:` (official / universal) | the plugin's source lives in a GitHub repo — online fetch |
-| 2 | `preset:rtk` (sample) | wiring the bundled RTK showcase |
-| 3 | local file (sample) | the plugin is a file on disk |
+| 1 | `github:` (advertised / default) | the plugin's source lives in a GitHub repo — online fetch |
+| 2 | `preset:rtk` (offline fallback, optional) | no network — GitHub unreachable, or an air-gapped host |
+| 3 | local file (fallback) | the plugin is a file on disk |
 
 Pick exactly one per plugin. Npm/bare package specifiers are not supported yet — the bridge refuses
 them out loud.
 
-### Path 1 — `github:` (official / universal, online)
+### Path 1 — `github:` (advertised / default, online)
 
 `github:<owner>/<repo>[@<ref>][#<path>]` — e.g. `github:obra/superpowers`.
 
@@ -82,10 +82,10 @@ what would be downloaded and both opt-ins:
   is offline or air-gapped, pre-warm the cache on a networked machine (run oc-bifrost once with
   opt-in) and copy its legacy/cache directory across.`
 
-> **Version gate.** `github:` ships in 0.4.0 (this release). Earlier published releases (0.3.0 and
-> below) cannot mount it - on those, use path 2 or 3.
+> **Version gate.** `github:` requires **oc-bifrost 0.4.0 or later**; releases **0.3.0 and below**
+> cannot mount it — on those, use path 2 (offline fallback) or path 3.
 
-### Path 2 — `preset:rtk` (sample, bundled, zero-fetch)
+### Path 2 — `preset:rtk` (offline fallback, optional, bundled, zero-fetch)
 
 `"plugins": ["preset:rtk"]` mounts the vendored `rtk-ai/rtk` plugin (`v0.50.0`, Apache-2.0).
 Nothing is fetched and nothing is parked.
@@ -104,7 +104,7 @@ or take the release asset from [`rtk-ai/rtk`](https://github.com/rtk-ai/rtk/rele
 Do **not** run `rtk init -g --opencode`: it writes `rtk.ts` into `<config>/plugins/`, a discovery
 directory (see step 3).
 
-### Path 3 — local file (sample)
+### Path 3 — local file (fallback)
 
 - Project install: `"plugins": ["./.opencode/legacy/<name>.ts"]` — a relative specifier resolves
   against the **session directory**, so it works only in the project that owns the file.

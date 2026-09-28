@@ -83,7 +83,46 @@ No `LoadError`. The V1 factory was discovered (`ClaudeCodeHooksPlugin`), called 
 
 ## Proof 3 — a real plugin fetched from GitHub loads
 
-`rtk-ai/rtk` `hooks/opencode/rtk.ts` (verbatim from `develop`) — a V1 named export using `tool.execute.before` and the Bun `$` shell — was discovered and mounted by the bridge. It self-disables on this host because its own preflight (`which rtk`) does not pass on Windows and no `rtk` binary was installed. That is the plugin's behaviour, not the bridge's: discovery, context, and `$` facade all worked.
+`rtk-ai/rtk` `hooks/opencode/rtk.ts` (verbatim from `develop`) — a V1 named export using `tool.execute.before` and the Bun `$` shell — was discovered and mounted by the bridge. With no `rtk` binary on `PATH` it self-disables at its own preflight, which is the plugin's behaviour, not the bridge's: discovery, context, and the `$` facade all worked.
+
+> **Correction (2026-09-28).** An earlier revision of this page blamed that preflight on Windows. That was wrong, and it sent a reader hunting a phantom platform bug. `which` resolves normally in the host's Bun shell on this machine — `C:\Program Files\Git\usr\bin\which.exe` is on `PATH` — and `$`which rtk`` succeeds the moment the binary exists. The sole cause was the missing binary. See **Proof 4**.
+
+## Proof 4 — live, in the operator's real global config
+
+Not isolated. The operator's own `~/.config/opencode`, bridge installed as the published npm package, RTK parked in `<config>/legacy/rtk.ts`.
+
+| Field | Value |
+|---|---|
+| Date | 2026-09-28 |
+| Host | OpenCode **2.0.18** (Windows) |
+| Bridge | `@nathwn12/oc-bifrost` (npm) |
+| Legacy plugin | `rtk-ai/rtk` `hooks/opencode/rtk.ts` @ tag `v0.50.0` |
+| rtk binary | **0.50.0** — `rtk-x86_64-pc-windows-msvc.zip`, sha256 verified against the release digest |
+
+Run: a fresh headless host against the real config, told to run exactly `git status --porcelain`.
+
+Load — the bridge is picked up:
+
+```
+level=INFO msg="loading plugin" id=@nathwn12/oc-bifrost
+```
+
+Execution — **the host's own spawn log shows the rewritten command**:
+
+```
+message="spawning process" command="pwsh.EXE"
+  args=["-NoLogo","-NoProfile","-NonInteractive","-Command","rtk git status --porcelain"]
+```
+
+The tool-call record still carries the pre-rewrite input (`git status --porcelain`); the process that actually ran was `rtk git status --porcelain`. Independent confirmation from rtk's own tracker:
+
+```
+$ rtk gain
+Total commands:    1
+ 1.  rtk git status --porc...      1
+```
+
+This is the strongest proof available here: not a side effect we inferred, but the host's own record of the command it executed.
 
 ## Defect found by this test (now documented)
 

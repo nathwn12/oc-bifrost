@@ -71,7 +71,55 @@ re-exports the built plugin:
 }
 ```
 
-See [`PROOF.md`](PROOF.md) for a verified isolated run.
+See [`PROOF.md`](PROOF.md) for a verified isolated run — and Proof 4 there for a **live** global install.
+
+### Global install (all projects)
+
+Installing into `~/.config/opencode` adds two rules, and both bite **silently**:
+
+- **Use an absolute path.** oc-bifrost resolves a relative specifier against the *session*
+  directory, so `./.opencode/legacy/rtk.ts` works only in the one project that owns that file.
+  Anywhere else the import fails and the plugin is skipped with a warning.
+- **Never park the legacy file in `<config>/plugin/` or `<config>/plugins/`.** Both are
+  auto-discovery directories; a bare `.ts` there is loaded directly and hard-rejected before
+  oc-bifrost can see it. Use `<config>/legacy/`.
+
+```jsonc
+{
+  "plugins": [
+    {
+      "package": "@nathwn12/oc-bifrost",
+      "options": { "plugins": ["C:/Users/you/.config/opencode/legacy/rtk.ts"] }
+    }
+  ]
+}
+```
+
+> **Known landmine.** Some plugins ship an installer that writes straight into a discovery
+> directory: `rtk init -g --opencode` targets `~/.config/opencode/plugins/rtk.ts`, which
+> *breaks* the host instead of wiring the bridge. Park the file in `legacy/` yourself and
+> reference it from `options.plugins`.
+
+### The plugin's own prerequisites are still yours
+
+oc-bifrost bridges **hooks**, not a plugin's external dependencies. If a plugin shells out to a
+binary, that binary must exist on `PATH` or the plugin will disable itself — correctly, and
+usually quietly.
+
+RTK is the worked example; it needs `rtk >= 0.23.0`:
+
+```sh
+winget install rtk-ai.rtk        # Windows
+brew install rtk                 # macOS / Linux
+```
+
+No winget? Take the `rtk-x86_64-pc-windows-msvc.zip` asset from
+[`rtk-ai/rtk` releases](https://github.com/rtk-ai/rtk/releases) and check it against the
+published digest.
+
+> ⚠️ **Name collision.** The crates.io crate `rtk` is a *different project* ("Rust Type Kit"),
+> and so is `rtk-cli`. `cargo install rtk` gives you the wrong binary. Install from
+> `rtk-ai/rtk` only.
 
 ## Let your agent set it up
 

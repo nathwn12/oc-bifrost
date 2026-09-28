@@ -1,5 +1,14 @@
 # Changelog
 
+## Unreleased
+
+### Fixed
+
+- **The shipped `vendor-update` script now explains why it cannot run from an installed copy.** It
+  rewrites `src/preset.ts`, which is not part of the published package, so running it from inside
+  `node_modules` previously failed with a bare `ENOENT`. The message now names the cause and the fix,
+  and `vendor/README.md` states the source-checkout requirement before the command list.
+
 ## 0.3.0
 
 ### Added

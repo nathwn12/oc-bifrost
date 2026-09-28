@@ -1,0 +1,5 @@
+# The vendored files are redistributed byte-identical to upstream (Apache-2.0).
+# Pinning LF keeps their recorded sha256 valid on every platform's checkout.
+vendor/rtk.ts            text eol=lf
+vendor/rtk-LICENSE       text eol=lf
+vendor/rtk-DISCLAIMER.md text eol=lf

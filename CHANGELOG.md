@@ -1,5 +1,18 @@
 # Changelog
 
+## 1.0.0
+
+First stable release.
+
+### Changed
+
+- **`github:` is now the single advertised mounting route.** The README quick start, `INSTALL.md`,
+  and the `skills/oc-bifrost` skill all lead with mounting a plugin by source.
+- **`preset:rtk` is documented as the optional offline / no-fetch fallback** — clearly marked as a
+  fallback, for offline or air-gapped hosts — rather than as the worked example.
+- **The version gate is now stated truthfully** — `github:` requires oc-bifrost 0.4.0 or later;
+  releases 0.3.0 and below cannot mount it. **No behavior change from 0.4.0.**
+
 ## 0.4.0
 
 ### Added

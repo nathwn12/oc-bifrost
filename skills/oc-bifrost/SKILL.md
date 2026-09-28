@@ -23,14 +23,14 @@ Plugin must export a default definition with an id and an effect or setup functi
 4. Add the bridge to the config's `plugins` array — one entry; OpenCode resolves the package, no `npm i`:
    `{ "package": "@nathwn12/oc-bifrost", "options": { "plugins": ["<one specifier>"] } }`
    The specifier is exactly one of three paths:
-   - `github:<owner>/<repo>[@<ref>][#<path>]` — official, by source (needs oc-bifrost from `main` / 0.4.0+).
+   - `github:<owner>/<repo>[@<ref>][#<path>]` — **the advertised, default route**, by source (requires oc-bifrost 0.4.0 or later; releases 0.3.0 and below cannot mount it).
      The first fetch downloads a plugin from GitHub and EXECUTES it with the host process's full user
      rights — by source means trusting the publisher. A cold cache refuses by default and names both
      opt-ins: `"trustRemote": true` on the bridge entry, or `OC_BIFROST_TRUST=github` in the
      environment. A warm, hash-verified cache then loads with no re-consent and no network; the mount
      report always prints the resolved commit, the digest, and the host-rights line. An offline cold
      cache fails closed and names the pre-warm path.
-   - `preset:rtk` — the bundled showcase (needs the `rtk` binary on `PATH`)
+   - `preset:rtk` — optional offline / no-fetch fallback, for air-gapped hosts (needs the `rtk` binary on `PATH`)
    - a local path — `./.opencode/legacy/<name>.ts` (project) or an absolute path (global)
 5. Restart. Confirm `loading plugin` with no `LoadError`, and read the printed report.
 6. Verify with a **side effect**, not the report: trigger one real tool call and assert the plugin's observable behaviour actually happened.

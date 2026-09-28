@@ -1,7 +1,6 @@
 name: Hook coverage
 description: Request that a V1 hook be bridged (or bridged better).
 title: "[hook] "
-labels: ["hook-coverage"]
 body:
   - type: input
     id: hook

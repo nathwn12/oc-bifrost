@@ -21,6 +21,14 @@ import { registerV1Hooks } from "./hooks.js"
 import { scanStrandedV1, strandedWarning } from "./scan.js"
 import { PRESETS, checkPrerequisite, type Preset, type PrerequisiteCheck } from "./preset.js"
 import { checkFreshness, freshnessEnabled, pinnedNote } from "./freshness.js"
+import {
+  mountNote,
+  parseGithubSpec,
+  remoteTrustEnabled,
+  resolveGithubPlugin,
+  type GithubResolveResult,
+  type GithubSpec,
+} from "./github.js"
 import type { BifrostOptions, OCContext, PluginEntry } from "./types.js"
 
 export { COMPAT_MATRIX, matrixRow } from "./compat-matrix.js"
@@ -39,14 +47,34 @@ function normalizeEntries(options: BifrostOptions | undefined): Array<{ spec: st
 
 /**
  * A resolved specifier. Discriminated so the caller can branch between a
- * mountable module URL and a bundled preset without re-parsing the string.
+ * mountable module URL, a bundled preset, and a remote `github:` spec without
+ * re-parsing the string.
  */
-export type ResolvedSpec = { kind: "module"; url: string } | { kind: "preset"; id: string }
+export type ResolvedSpec =
+  | { kind: "module"; url: string }
+  | { kind: "preset"; id: string }
+  | { kind: "github"; spec: GithubSpec }
+
+/** The honest refusal for a form this slice does not build. */
+export function unsupportedSpecifierMessage(spec: string): string {
+  return (
+    `[oc-bifrost] unsupported specifier "${spec}": npm and bare package names are not yet supported; ` +
+    `accepted forms are: preset:, github:, ~/path, ./path (or an absolute path)`
+  )
+}
 
 /**
  * Resolve a user-supplied specifier against the session directory.
  *
  * Supported forms, in order:
+ *   - `github:<owner>/<repo>[@<ref>][#<path>]` -> a remote V1 plugin, mounted
+ *                BY SOURCE: resolved cache-first into a verified local cache
+ *                under the location directory (`legacy/cache/`). The FIRST
+ *                fetch requires explicit consent (`options.trustRemote: true`
+ *                or `OC_BIFROST_TRUST=github`) — a cold cache refuses to
+ *                fetch+execute otherwise. The ref resolves to a commit sha
+ *                that is recorded with the sha256 and verified on every later
+ *                load. See `github.ts`.
  *   - `~/...`  -> expands against `os.homedir()`, then treated as absolute.
  *                A bare `~` is invalid and throws. This is the reliable way to
  *                name a global install location on every platform.
@@ -54,8 +82,10 @@ export type ResolvedSpec = { kind: "module"; url: string } | { kind: "preset"; i
  *                the valid list.
  *   - `./`, `../`, absolute -> a `file://` URL resolved against `directory`
  *                (unchanged from 0.1.0 — the regression surface).
- *   - anything else (including `file://`) -> passed through as a bare module
- *                specifier.
+ *   - `file://` -> passed through as a bare module specifier.
+ *   - anything else — including `npm:` and bare package names — is refused
+ *                with the accepted-forms message. npm support is not built
+ *                yet; refusing honestly beats guessing.
  */
 export function resolveSpec(spec: string, directory: string): ResolvedSpec {
   if (spec === "~") {
@@ -75,9 +105,13 @@ export function resolveSpec(spec: string, directory: string): ResolvedSpec {
     }
     return { kind: "preset", id }
   }
+  if (spec.startsWith("github:")) {
+    return { kind: "github", spec: parseGithubSpec(spec) }
+  }
   const isRelative = spec.startsWith("./") || spec.startsWith("../") || path.isAbsolute(spec)
-  if (!isRelative) return { kind: "module", url: spec }
-  return { kind: "module", url: pathToFileURL(path.resolve(directory, spec)).href }
+  if (isRelative) return { kind: "module", url: pathToFileURL(path.resolve(directory, spec)).href }
+  if (spec.startsWith("file://")) return { kind: "module", url: spec }
+  throw new Error(unsupportedSpecifierMessage(spec))
 }
 
 /**
@@ -139,6 +173,7 @@ export default Plugin.define({
       let specifier: string
       let presetNote: string | undefined
       let bundle: Preset | undefined
+      let githubNote: string | undefined
       if (resolved.kind === "preset") {
         bundle = PRESETS[resolved.id] as Preset
         const check: PrerequisiteCheck = await checkPrerequisite(bundle)
@@ -151,6 +186,27 @@ export default Plugin.define({
         // the mount report names the vendored version with zero network access.
         presetNote = `${check.message}; ${pinnedNote(bundle)}`
         specifier = bundle.entry.href
+      } else if (resolved.kind === "github") {
+        // Cache-first with an explicit consent gate: a cold cache refuses to
+        // fetch+execute unless opted in (`options.trustRemote` or the
+        // OC_BIFROST_TRUST=github env); a warm, hash-verified cache loads
+        // with zero network and no re-consent. The cache lives under the same
+        // location directory that hosts the config naming this plugin.
+        let gh: GithubResolveResult
+        try {
+          gh = await resolveGithubPlugin(resolved.spec, {
+            cacheRoot: path.join(directory, "legacy", "cache"),
+            trusted: remoteTrustEnabled(options.trustRemote, process.env),
+          })
+        } catch (error) {
+          reporter.warn((error as Error).message)
+          if (options.strict) throw error
+          continue
+        }
+        specifier = gh.url
+        // Always names the resolved commit, the digest, and the host-rights
+        // reality — the consent stays informed on every later load.
+        githubNote = mountNote(gh.meta, gh.fetched)
       } else {
         specifier = resolved.url
       }
@@ -194,6 +250,8 @@ export default Plugin.define({
         }
         if (resolved.kind === "preset" && presetNote) {
           reporter.record(`preset:${resolved.id}`, "mounted", presetNote)
+        } else if (resolved.kind === "github" && githubNote) {
+          reporter.record(`github:${resolved.spec.owner}/${resolved.spec.repo}`, "mounted", githubNote)
         }
         mounted = true
       } catch (error) {

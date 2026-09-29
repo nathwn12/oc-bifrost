@@ -79,8 +79,8 @@ export const COMPAT_MATRIX: readonly MatrixRow[] = [
   {
     hook: "event",
     level: "partial",
-    v2: "ctx.event.subscribe(); V2 session.status[idle] -> V1 session.idle envelope, other names/payloads pass through",
-    test: "bridge: session idle events are translated to the V1 envelope",
+    v2: "ctx.event.subscribe(); V2 session.execution.succeeded|failed|interrupted -> V1 session.idle envelope, other names/payloads pass through",
+    test: "bridge: terminal execution events are synthesised to the V1 session.idle envelope",
   },
   {
     hook: "client.session.messages",

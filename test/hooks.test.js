@@ -433,7 +433,7 @@ test("bridge: event hook registers a subscription", async () => {
   assert.equal(subscriptions[0].signal.aborted, true, "cleanup must abort the subscription")
 })
 
-test("bridge: session idle events are translated to the V1 envelope", async () => {
+test("bridge: terminal execution events are synthesised to the V1 session.idle envelope", async () => {
   const { ctx, pushEvent } = fakeContext()
   const seen = []
   let delivered
@@ -443,28 +443,38 @@ test("bridge: session idle events are translated to the V1 envelope", async () =
     {
       event: async ({ event }) => {
         seen.push(event)
-        if (seen.length === 3) delivered()
+        if (seen.length === 5) delivered()
       },
     },
     createReporter("idle", {}),
   )
 
-  // V2's current idle signal is an ephemeral session.status event.
-  pushEvent({ id: "evt_status", created: 1, type: "session.status", data: { sessionID: "ses_a", status: { type: "idle" } } })
+  // Every terminal execution event is the V2 idle signal - the same three
+  // events the client itself converges on (packages/client/src/solid/data.ts:
+  // 1025-1028, and packages/schema/src/session-event.ts:246-257).
+  pushEvent({ id: "evt_done", created: 1, type: "session.execution.succeeded", data: { sessionID: "ses_a" } })
+  pushEvent({ id: "evt_fail", created: 2, type: "session.execution.failed", data: { sessionID: "ses_b", error: { message: "boom" } } })
+  pushEvent({ id: "evt_stop", created: 3, type: "session.execution.interrupted", data: { sessionID: "ses_a", reason: "user" } })
   // The deprecated session.idle event is still emitted and keeps its own name.
-  pushEvent({ id: "evt_legacy", created: 2, type: "session.idle", data: { sessionID: "ses_b" } })
+  pushEvent({ id: "evt_legacy", created: 4, type: "session.idle", data: { sessionID: "ses_c" } })
   // Anything else passes through untouched: only idle has a V1 name to land on.
-  pushEvent({ id: "evt_busy", created: 3, type: "session.status", data: { sessionID: "ses_c", status: { type: "busy" } } })
+  pushEvent({ id: "evt_started", created: 5, type: "session.execution.started", data: { sessionID: "ses_a" } })
   await all
 
-  assert.equal(seen.length, 3)
+  assert.equal(seen.length, 5)
   assert.equal(seen[0].type, "session.idle")
   assert.deepEqual(seen[0].properties, { sessionID: "ses_a" })
-  assert.equal(seen[0].id, "evt_status", "the V2 payload is preserved alongside the V1 envelope")
+  assert.equal(seen[0].id, "evt_done", "the V2 payload is preserved alongside the V1 envelope")
   assert.equal(seen[1].type, "session.idle")
   assert.deepEqual(seen[1].properties, { sessionID: "ses_b" })
-  assert.equal(seen[2].type, "session.status")
-  assert.deepEqual(seen[2].data, { sessionID: "ses_c", status: { type: "busy" } })
+  assert.ok("error" in seen[1].data, "the failed payload keeps its error detail")
+  assert.equal(seen[2].type, "session.idle")
+  assert.deepEqual(seen[2].properties, { sessionID: "ses_a" })
+  assert.equal(seen[2].id, "evt_stop")
+  assert.equal(seen[3].type, "session.idle")
+  assert.deepEqual(seen[3].properties, { sessionID: "ses_c" })
+  assert.equal(seen[4].type, "session.execution.started")
+  assert.deepEqual(seen[4].data, { sessionID: "ses_a" })
 
   for (const cleanup of result.cleanups) await cleanup()
 })

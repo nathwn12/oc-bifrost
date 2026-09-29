@@ -7,6 +7,15 @@ import { pathToFileURL } from "node:url"
 import bifrost from "../dist/index.js"
 
 /**
+ * These tests run the real mount loop, so the durable report sink is live inside
+ * them. With no override every `npm run check` would append its mounts to the
+ * operator's real user cache (`~/.cache/opencode/oc-bifrost/report.log`). Nothing
+ * here asserts sink behaviour — that is `sink.test.js`, with its own paths — so
+ * the sink is off for this file.
+ */
+process.env.OC_BIFROST_REPORT = "off"
+
+/**
  * The bridge's headline claim is that it scales to N plugins with one writer per
  * artifact and no collision. Until now every test mounted exactly one plugin, so
  * that claim was structural but unexecuted. These tests run the real mount loop.

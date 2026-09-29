@@ -50,9 +50,22 @@ export function discover(module: Record<string, unknown>, spec: string): Discove
     return { kind: "v1", id: fallbackId, factory: module.default as V1Plugin, note: "V1 default export" }
   }
 
+  // Named function exports. A V1 factory IS a function by contract
+  // (`Plugin = (input) => Promise<Hooks>` - the return is the hook map), so
+  // recognition is shape-based; the name heuristic survives only as a
+  // PREFERENCE for modules whose first function export is a helper rather
+  // than the factory itself (e.g. autotitle exports pure test helpers
+  // alongside `AutoTitle`). A module whose exports are all non-functions is
+  // still refused out loud.
   for (const [name, value] of Object.entries(module)) {
     if (isFactory(value) && PLUGIN_EXPORT.test(name)) {
       return { kind: "v1", id: name.replace(PLUGIN_EXPORT, "") || fallbackId, factory: value as V1Plugin, note: `V1 named export (${name})` }
+    }
+  }
+
+  for (const [name, value] of Object.entries(module)) {
+    if (isFactory(value)) {
+      return { kind: "v1", id: name, factory: value as V1Plugin, note: `V1 named export by shape (${name})` }
     }
   }
 

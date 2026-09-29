@@ -535,10 +535,13 @@ Three facade rows and one event row were added or sharpened by this change:
 - `client.tui.showToast` — 🔴 **refused** (`src/compat-matrix.ts:97-102`): no sanctioned
   server-plugin publish surface; `tui.toast.show` is a **TUI-process event**. Refused loudly at load
   (`src/context.ts:51-53`) and on call (`src/context.ts:113-122`).
-- `event` — 🟡 **partial**, and this is the trigger the tracker needs: a V2 `session.status` whose
-  `status.type` is `"idle"` is synthesised to the V1
-  `{ type: "session.idle", properties: { sessionID } }` envelope, and the deprecated `session.idle`
-  event gets its `properties` alias (`src/hooks.ts:32-42`).
+- `event` - 🟡 **partial**, and this is the trigger the tracker needs: a V2
+  `session.execution.succeeded|failed|interrupted` - the durable terminal-execution events V2
+  emits when a session run ends (`packages/schema/src/session-event.ts:246-257`, the same source
+  the client's own idle derivation reads, `packages/client/src/solid/data.ts:1025-1028`) - is
+  synthesised to the V1 `{ type: "session.idle", properties: { sessionID } }` envelope, and the
+  deprecated `session.idle` event gets its `properties` alias (`src/hooks.ts:29-60`). The earlier
+  `session.status[idle]` synthesis is gone: V2 never emits that event to the plugin feed.
 
 ### The live mount (durable sink, operator's harness)
 
@@ -569,7 +572,7 @@ synthesis above is what gives the tracker its trigger.
 `test/token-tracker.test.js` imports the real cached `token-tracker.js` (skipped only when the cache
 tree is absent, `:94-96`), discovers it as a V1 factory (`:102-105`), builds the V1 context and
 registers its hooks on the same bridge code this page documents (`:107-109`), then pushes a V2
-`session.status` idle event (`:111-116`). What the test proves, in the tracker's own source terms:
+`session.execution.succeeded` terminal event (`:111-116`). What the test proves, in the tracker's own source terms:
 
 - The synthesised idle event **reaches the tracker**: it calls `client.session.messages` with the
   session id (`:121-125`; the tracker's `event` hook is `token-tracker.js:110-113`).
@@ -694,15 +697,39 @@ scoped PR with its own test.
    `packages/core/src/v1/config/migrate.ts:120`), while V1-era plugins gate on `"bash"`
    (snip, pr-signature, workaholic). Those plugins mount and register, then silently no-op.
    RTK works only because its vendor accepts both names.
-3. **Event vocabulary** — V2 2.0.18's plugin feed carried `session.execution.*`, `session.step.*`,
+3. **Event vocabulary** - V2 2.0.18's plugin feed carried `session.execution.*`, `session.step.*`,
    `session.text.*`, `session.usage.updated`, `session.renamed`, `model/provider/plugin.updated`
-   (autotitle debug log) with **no** `session.status`/`session.idle` observable, so the matrix's
-   documented `session.status[idle] -> session.idle` synthesis never fired for the two plugins that
-   rely on it (autotitle, host-notify-bridge). The `partial` event row is accurate; the mapping
-   may be stale for this host version.
-4. **Working as designed, worth knowing** — the snapshot guard refused `RoderickQiu/opencode-workaholic`
+   (autotitle debug log) with **no** `session.status`/`session.idle` observable, so the flown
+   1.3.0 build's `session.status[idle] -> session.idle` synthesis never fired for the two plugins
+   that rely on it (autotitle, host-notify-bridge). The `partial` event row is accurate; the
+   mapping was in fact stale for 2.0.18 - the compat merge (#19) replaced it with the
+   terminal-execution synthesis the feed *does* carry (`src/hooks.ts:29-60`; durable events per
+   `packages/schema/src/session-event.ts:246-257`, mirroring the client's own idle derivation at
+   `packages/client/src/solid/data.ts:1025-1028`).
+4. **Working as designed, worth knowing** - the snapshot guard refused `RoderickQiu/opencode-workaholic`
    because of an archive entry with `:`. On Windows, repos containing such names (e.g. `.mise/tasks/lint:fix`)
    cannot be materialized; the refusal is loud and nothing executes. Not a defect to fix blindly.
+
+### Compat expansion - merged via #19 (2026-09-29)
+
+The three findings above became one squash (`9f7f05d`, PR #19; the superseded-closed #17/#18 were
+absorbed into it) - all three landed **for the code**, none have been re-flown:
+
+1. **Shape-based V1-factory discovery** (`src/discover.ts`) - any function export is now a V1
+   factory; the `/Plugin$/` name heuristic survives only as a preference for modules whose first
+   function export is a helper. SystemPromptLogger-/DirenvLoader-class plugins are rescued.
+2. **V1-era tool name in bridged hook input** (`src/hooks.ts`) - `v1ToolName()` presents `bash`
+   for V2's `shell` (`packages/core/src/tool/plugin/shell.ts:22`), so `input.tool === "bash"`
+   gates match; every other tool name passes through unchanged.
+3. **`session.idle` from terminal execution events** (`src/hooks.ts:29-60`) - V2
+   `session.execution.succeeded|failed|interrupted` is synthesised to the V1 `session.idle`
+   envelope (durable events per `packages/schema/src/session-event.ts:246-257`, mirroring the
+   client's own idle derivation: `packages/client/src/solid/data.ts:1025-1028`); the old
+   `session.status[idle]` synthesis is gone.
+
+Matrix levels are unchanged - the `event` row stays 🟡 **partial**. Re-flight evidence (snip,
+pr-signature, autotitle, host-notify-bridge on this build) is deferred to a fresh session; this
+note records the merge, not a verdict.
 
 ### Honest scope of Proof 11
 

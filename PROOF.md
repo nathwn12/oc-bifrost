@@ -385,3 +385,91 @@ opencode run --auto --standalone --print-logs "Run this exact shell command: ech
 - Proven by the test suite, not by a host run here: `tool.execute.after` and refusal reporting (`test/hooks.test.js`; `test/matrix.test.js`).
 - Not proven here: the `partial` and `unsupported` rows of the matrix under load, and behaviour on Linux/macOS.
 - One host, one version (2.0.18). Re-run on each OpenCode release before trusting it there.
+
+## Proof 9 — the verdict flight: ten awesome-opencode plugins on the packed 1.2.0 tarball
+
+Date 2026-09-29. Host: OpenCode **2.0.18** (Windows), Node 24.21.0, Bun 1.4.2 (probe).
+
+The owner ultimatum: prove real plugins from the awesome-opencode collection work on a REAL V2
+host through the PACKED tarball, each with a DECIDABLE artifact — or the project is dead. "An
+honest refusal is a documented verdict, never a faked pass." The ready-made artifact under test:
+
+- `nathwn12-oc-bifrost-1.2.0.tgz` — 102,817 bytes, sha256 `5AD94BE4F42FE58BC0A5B68544F4EDCC1C16ACE20B958D1A4A132B623B0254D3` —
+  the pack containing the snapshot route (`dist/archive.js`), built on `feat/github-snapshot @ d55247f`
+  (the 1.2.0 release under PR #9).
+- Plugin spec in every flight: `"package": "file:<abs tarball>"` with
+  `"options": { "plugins": ["github:<owner>/<repo>@<pin>[#<path>]"] }`.
+
+### Isolation method (tightened)
+
+Per-process env (`OPENCODE_CONFIG_DIR`, `OPENCODE_DISABLE_PROJECT_CONFIG=1`, `XDG_*_HOME`,
+`npm_config_cache`+`offline`, plus `HOME`/`USERPROFILE` — required by plugins that touch
+`~/.config/opencode` paths) pointed every child process at the sandbox. Credentials were provided
+by a **consistent SQLite snapshot** of the operator's data DB — `sqlite3 <db> ".backup"`, which
+includes WAL contents — copied BY POINTER into the sandbox (`opencode.db` under the sandbox's
+`XDG_DATA_HOME`; never read, never rendered; a raw file copy without `-wal`/`-shm` was validated
+first and FAILED model auth with "Insufficient account funds" — the snapshot fixed it). Nothing
+outside the sandbox was read or written except that one backup read. The npm cache was seeded once
+(`npm install` of the tarball into a scratch prefix with the shared cache dir) so the host's
+offline Arborist install could resolve the bridge's peer dependency.
+
+Every flight: `opencode serve --port 0 --print-logs` → parse url+password →
+`opencode run --server <url> --auto "<prompt>" --model opencode-go/deepseek-v4-flash#max`
+(the config-less default model is a paid endpoint with no balance; an explicit `--model` with the
+DB-snapshot credentials answered reliably). Evidence per plugin: `REPORT.log` mount block (durable
+sink), server logs, transcript, artifact, and — for isolated runs — the session record extracted
+from the sandbox DB copy (`session_v2`/`session_message`, the store the CLI export also reads).
+
+### The fix this flight carried (one logical change)
+
+`chat.message` previously built `{ message, parts }` and discarded it. V2 reads `event.prompt`
+back (`packages/core/src/session/prompt.ts:40-52`), so the V1 write now lands on
+`event.prompt.text`: the hook is pre-filled with the V1-era `message.content` + a leading text
+part from the V2 prompt text, and a changed `message.content` or changed text parts replace the
+prompt text (idempotent for no-op hooks). `src/hooks.ts` + tests; `npm run check` green
+(159/159 on the main-based branch; the snapshot feature branch's extra test file is PR #9's).
+
+### The ten flights
+
+| # | Plugin (pin) | Route / hooks | Decidable | Verdict |
+|---|---|---|---|---|
+| 1 | **obra/superpowers** `8ca22dba…` `.opencode/plugins/superpowers.js` | V2 pass-through: `setup` (ctx.skill.transform + session.hook) | model enumerates skills; **all 15 names from the materialized snapshot** (`using-superpowers` among them); snapshot 229 files / 1.97 MB in the mount note | ✅ **full pass — overturns the mount-only verdict of Proofs 6–7**: the snapshot route delivers `../../skills`, so the setup's self-check finds its directory and registers every skill |
+| 2 | **d3vv3/opencode-ascii** `e42bb23f…` `dist/index.js` | V1 named export; `tool.execute.before` (full) + `experimental.text.complete` (refused) | "write note.txt with: hello — world" → `note.txt` = `hello - world`, **0 non-ASCII bytes**; refusal line in the report | ✅ pass |
+| 3 | **ramarivera/opencode-model-announcer** `7b7129c0…` `src/plugin.ts` | V1 named export; `experimental.chat.messages.transform` (partial) | answer contains `CURRENT_MODEL_ANNOUNCEMENT` / provider+model | ❌ **not proven** — the hook assumes V1 `{info, parts}[]` and **crashed the real host session** (`TypeError: m.info.role`, `service.ts:20`); run failed. The bridge's `partial` line names the loss exactly; no write-back exists for this hook |
+| 4 | **gotgenes/opencode-agent-identity** `6ed87ad9…` `src/agent-self-identity.ts` | V1 named export; `experimental.chat.messages.transform` + `system.transform` (partial) | "Which agent are you?" names the agent | ❌ **not proven** — same `m.info.role` crash (`agent-self-identity.ts:22`); run failed |
+| 5 | **joostvanwollingen/opencode-personality** `9caf80ff…` `src/index.ts` | V1 default export; `system.transform`, 2-tool V1 map, `event` (partial) + `command.execute.before` (refused) | bun probe (1.4.2) reproduced the import failure; **provisioned** (only dep junctioned) → persona `FlightTestPersona` reached the model ("…always ends replies with the word BANANA… BANANA") | ⚠️ **refused as fetched** (`Cannot find package '@opencode-ai/plugin'` — prerequisite, not the bridge) → ✅ **provisioned pass** |
+| 6 | **boxpositron/envsitter-guard** `17e37f2f…` | import failure | mount report names the failure; session stays healthy ("Hello!") | ❌ documented refusal — `Cannot find package '@opencode-ai/plugin'` |
+| 7 | **lgladysz/opencode-ignore** `7ca42ef5…` | import failure | same | ❌ documented refusal — `Cannot find package 'ignore'` |
+| 8 | **synthetic V1 `chat.message` sanitizer** (the real log-sanitizer repo+user are deleted from GitHub — this fixture reproduces its exact V1 shape, clearly labeled) | V1 module; `chat.message` (partial→**write-back fixed in this PR**) | JWT-shaped token in the prompt → `[redacted:jwt]` in **the persisted session store** and in `token.txt` (the model saw only the redaction) | ✅ **pass on the fixed build** (`nathwn12-oc-bifrost-1.1.0.tgz` packed from this branch, sha256 `A8C9FABE…`; the ready-made 1.2.0 pack cannot carry the fix by definition) |
+| 9 | **JosXa/opencode-snippets** `29102213…` | dual export → V2 pass-through (`setup` incl. `v2-request` expansion) | `#hello` expansion in the persisted session store, fresh sandbox, tools forbidden in the prompt | ⚠️ refused as fetched (`Cannot find package '@opencode/plugin'`) — ✅ **provisioned pass** (declared deps junctioned; 185-file snapshot; `mounted v2:opencode-snippets`; the stored user message shows `#hello` replaced by the expansion) |
+| 10 | **shihyuho/opencode-command-inject** `14787ebc…` | `config` + `command.execute.before` (both in the refused list) | loud refusal chain | ❌ documented refusal, two layered failures: repo tarball carries **`CLAUDE.md` as a symlink** → snapshot refused ("links and device nodes are never materialized") → single-file fallback → sibling `./src/plugin` absent → import failure. Session stayed healthy |
+
+### Findings the flights surfaced
+
+- **Snapshot route works.** Four flights (#1, #2, #5, #9) materialized full pinned trees
+  (229, 15, 25, 185 files) and the plugins' sibling reads succeeded — the exact failure Proofs
+  6–7 documented is gone.
+- **`experimental.chat.messages.transform` is worse than partial: it crashes sessions.**
+  Two real plugins (#3, #4) were handed V2 `Message[]` while reading V1 `m.info` — `TypeError`
+  inside the session drain, run aborted. The bridge's `partial` note describes the shape
+  difference honestly, but a partial that kills the session is a defect worth its own PR: either
+  a `{info, parts}` ⇄ `Message[]` conversion with write-back, or a guarded no-op that swallows
+  and logs. **Recommended next fix.**
+- **`chat.message` write-back needs the pre-fill to be usable.** The first flight of #8 (write-back
+  only) mounted but sanitized nothing: the V1 hook received EMPTY parts and had nothing to rewrite.
+  The pre-fill (this PR) made it work end to end.
+- **A by-source fetch carries no npm deps.** #5/#9 load whole declared dependency sets the moment
+  they are provided on disk (junctioned `node_modules` in the sandbox cache tree); nothing in the
+  bridge changes. Confirms VERIFIED-PLUGINS.md's standing line: prerequisites are not the bridge's
+  job — and shows the honest refusal text naming the exact missing package.
+
+### Honest scope of Proof 9
+
+- Proven: the packed-tarball bridge on a real host — **plugin passes** (superpowers, ascii,
+  personality-provisioned, sanitizer, snippets-provisioned) and **documented refusals**
+  (announcer, identity — shape crash; envsitter, ignore, command-inject — prerequisite/loud
+  chain), session-store write-back end to end, snapshot route, report sink, refusal honesty
+  under load.
+- One model (opencode-go/deepseek-v4-flash#max), one host version (2.0.18), Windows. No Linux/macOS.
+- Evidence lives in `%TEMP%\opencode\bifrost-evidence\<plugin>\` — `REPORT.log`, transcripts,
+  artifacts, `decidable.txt` summaries; the flight harness in `%TEMP%\opencode\bifrost-verdict\`.

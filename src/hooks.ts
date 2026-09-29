@@ -112,10 +112,35 @@ export async function registerV1Hooks(
   const chatMessage = asHandler(table["chat.message"])
   if (chatMessage) {
     await ctx.session.hook("prompt", async (event) => {
-      const output = { message: undefined, parts: [] as unknown[] }
+      // V2 reads `event.prompt` back as the message text (`session/prompt.ts:40-52`),
+      // so the V1 write must land on `event.prompt.text`. The V1 hook is handed the
+      // V1-era shapes pre-filled from the V2 prompt text — `output.message` (whole
+      // message) and `output.parts` (a leading text part) — and its rewrite is read
+      // back: a changed `message.content`, or text parts that changed from the
+      // pre-fill, replace the prompt text. Idempotent: a no-op hook changes nothing.
+      const prompt = (event as { prompt?: { text?: string } }).prompt
+      const original = (prompt && typeof prompt.text === "string" ? prompt.text : "") as string
+      const output = {
+        message: { role: "user", content: original },
+        parts: [{ type: "text", text: original }] as unknown[],
+      }
       await chatMessage({ sessionID: event.sessionID, messageID: event.messageID }, output)
+      const content = (output.message as { content?: unknown } | undefined)?.content
+      const textParts = Array.isArray(output.parts)
+        ? (output.parts as Array<{ type?: string; text?: unknown }>)
+            .filter((part) => part?.type === "text" && typeof part.text === "string")
+            .map((part) => part.text as string)
+        : []
+      const partsJoin = textParts.join("")
+      const rewritten =
+        typeof content === "string" && content !== original && content.length > 0
+          ? content
+          : partsJoin !== original && partsJoin.length > 0
+            ? partsJoin
+            : original
+      if (prompt && rewritten !== original) prompt.text = rewritten
     })
-    reporter.record("chat.message", "partial", "prompt hook; UserMessage/Part write-back not preserved")
+    reporter.record("chat.message", "partial", "prompt hook; pre-filled V1 message/parts -> event.prompt.text write-back")
   }
 
   /* ---------------- permission.ask ---------------- */

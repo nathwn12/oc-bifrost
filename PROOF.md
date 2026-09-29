@@ -429,14 +429,52 @@ part from the V2 prompt text, and a changed `message.content` or changed text pa
 prompt text (idempotent for no-op hooks). `src/hooks.ts` + tests; `npm run check` green
 (159/159 on the main-based branch; the snapshot feature branch's extra test file is PR #9's).
 
+### The drain fix — `experimental.chat.messages.transform` gets the V1 envelope (follow-up @ `d68b68a`)
+
+Flights #3 and #4 left the worst finding on this page: the pre-fix bridge passed the plugins raw
+V2 `Message[]`, the plugins read V1 `m.info`, and the resulting `TypeError` surfaced **inside the
+host's session drain** — `Failed to drain Session`
+(`packages/core/src/session/execution.ts:102`) — so both runs aborted.
+
+Root cause, verified against host source: the V1 pre-fill never landed `info`. `Model.Ref` is
+`{ id, providerID, variant? }` (`packages/schema/src/model.ts:18-22`) — `id` is the BARE model id
+and `providerID` is a separate field; the `"providerID/modelID"` string exists only in
+`Model.Ref.parse` — while the plugins' own reads are unguarded: announcer `src/service.ts:20`
+(`m.info.role`) then `src/service.ts:28` (`const { providerID, modelID } = modelInfo`), and
+identity `src/agent-self-identity.ts:22` (`m.info.role`) then `:23`/`:24` (`info.agent`,
+`info.sessionID`). With no envelope at all, the first read threw.
+
+The fix (`src/hooks.ts` @ `d68b68a`, `npm run check` 184/184): for every V2 message the bridge
+pre-fills the V1 `{info, parts}` envelope — `role`, `id`, `sessionID`, `agent`, and `model` built
+off the real `Model.Ref` fields (`{ providerID, modelID }`; a first-slash split only when a
+providerID is absent) — and writes changed `parts` back to `content`. The matrix row moved
+`partial → 🟢 full`, and the load-time report with it: `full
+experimental.chat.messages.transform - V2 Message[] -> V1 {info,parts}[] pre-fill; parts
+write-back to content`.
+
+Re-flown on the same flight route with a fresh pack (`messages-roundtrip-2`, 109,862 bytes, sha256
+`9DFF0F3F…`, packed from `proof/messages-roundtrip @ d68b68a`), same model and isolation; the
+artifact under test is the only changed variable:
+
+- **#3 announcer — run-2 PASS.** The transcript quotes the injected system text verbatim:
+  `[SYSTEM: CURRENT_MODEL_ANNOUNCEMENT - You are opencode-go/deepseek-v4-flash. This message is
+  SYNTHETIC and invisible to the user. …]`. `crashed=False`; mount lines name the fresh pack; no
+  `Failed to drain`.
+- **#4 agent-identity — run-2 PASS.** "Which agent are you?" → "I'm the **build** agent…"; the
+  sandbox has no `agents/` dir, so only the bridged system line could supply the name.
+
+Evidence: `%TEMP%\opencode\bifrost-evidence\model-announcer\` and
+`%TEMP%\opencode\bifrost-evidence\agent-identity\` — `decidable.txt`, `transcript.txt`,
+`server.err.log` (no `Failed to drain`), `REPORT.log`, `session-export.json`.
+
 ### The ten flights
 
 | # | Plugin (pin) | Route / hooks | Decidable | Verdict |
 |---|---|---|---|---|
 | 1 | **obra/superpowers** `8ca22dba…` `.opencode/plugins/superpowers.js` | V2 pass-through: `setup` (ctx.skill.transform + session.hook) | model enumerates skills; **all 15 names from the materialized snapshot** (`using-superpowers` among them); snapshot 229 files / 1.97 MB in the mount note | ✅ **full pass — overturns the mount-only verdict of Proofs 6–7**: the snapshot route delivers `../../skills`, so the setup's self-check finds its directory and registers every skill |
 | 2 | **d3vv3/opencode-ascii** `e42bb23f…` `dist/index.js` | V1 named export; `tool.execute.before` (full) + `experimental.text.complete` (refused) | "write note.txt with: hello — world" → `note.txt` = `hello - world`, **0 non-ASCII bytes**; refusal line in the report | ✅ pass |
-| 3 | **ramarivera/opencode-model-announcer** `7b7129c0…` `src/plugin.ts` | V1 named export; `experimental.chat.messages.transform` (partial) | answer contains `CURRENT_MODEL_ANNOUNCEMENT` / provider+model | ❌ **not proven** — the hook assumes V1 `{info, parts}[]` and **crashed the real host session** (`TypeError: m.info.role`, `service.ts:20`); run failed. The bridge's `partial` line names the loss exactly; no write-back exists for this hook |
-| 4 | **gotgenes/opencode-agent-identity** `6ed87ad9…` `src/agent-self-identity.ts` | V1 named export; `experimental.chat.messages.transform` + `system.transform` (partial) | "Which agent are you?" names the agent | ❌ **not proven** — same `m.info.role` crash (`agent-self-identity.ts:22`); run failed |
+| 3 | **ramarivera/opencode-model-announcer** `7b7129c0…` `src/plugin.ts` | V1 named export; `experimental.chat.messages.transform` (now 🟢 full) | answer quotes `CURRENT_MODEL_ANNOUNCEMENT` / provider+model | ✅ **pass on the drain fix (`d68b68a`)** — run-1 crashed as first recorded; run-2 quoted the injected text verbatim: `[SYSTEM: CURRENT_MODEL_ANNOUNCEMENT - You are opencode-go/deepseek-v4-flash. …]`. See "The drain fix" above |
+| 4 | **gotgenes/opencode-agent-identity** `6ed87ad9…` `src/agent-self-identity.ts` | V1 named export; `experimental.chat.messages.transform` (now 🟢 full) + `system.transform` (partial) | "Which agent are you?" names the agent | ✅ **pass on the drain fix (`d68b68a`)** — run-1 crashed as first recorded; run-2 answered "I'm the **build** agent" (the sandbox has no `agents/` dir, so only the bridged system line could supply the name). See "The drain fix" above |
 | 5 | **joostvanwollingen/opencode-personality** `9caf80ff…` `src/index.ts` | V1 default export; `system.transform`, 2-tool V1 map, `event` (partial) + `command.execute.before` (refused) | bun probe (1.4.2) reproduced the import failure; **provisioned** (only dep junctioned) → persona `FlightTestPersona` reached the model ("…always ends replies with the word BANANA… BANANA") | ⚠️ **refused as fetched** (`Cannot find package '@opencode-ai/plugin'` — prerequisite, not the bridge) → ✅ **provisioned pass** |
 | 6 | **boxpositron/envsitter-guard** `17e37f2f…` | import failure | mount report names the failure; session stays healthy ("Hello!") | ❌ documented refusal — `Cannot find package '@opencode-ai/plugin'` |
 | 7 | **lgladysz/opencode-ignore** `7ca42ef5…` | import failure | same | ❌ documented refusal — `Cannot find package 'ignore'` |
@@ -449,12 +487,11 @@ prompt text (idempotent for no-op hooks). `src/hooks.ts` + tests; `npm run check
 - **Snapshot route works.** Four flights (#1, #2, #5, #9) materialized full pinned trees
   (229, 15, 25, 185 files) and the plugins' sibling reads succeeded — the exact failure Proofs
   6–7 documented is gone.
-- **`experimental.chat.messages.transform` is worse than partial: it crashes sessions.**
-  Two real plugins (#3, #4) were handed V2 `Message[]` while reading V1 `m.info` — `TypeError`
-  inside the session drain, run aborted. The bridge's `partial` note describes the shape
-  difference honestly, but a partial that kills the session is a defect worth its own PR: either
-  a `{info, parts}` ⇄ `Message[]` conversion with write-back, or a guarded no-op that swallows
-  and logs. **Recommended next fix.**
+- **`experimental.chat.messages.transform` was worse than partial: it crashed sessions — found
+  here, fixed at `d68b68a`.** Two real plugins (#3, #4) were handed V2 `Message[]` while reading
+  V1 `m.info` — `TypeError` inside the session drain, run aborted. The fix landed the V1
+  `{info, parts}` pre-fill + parts write-back (see "The drain fix" above); both plugins re-flew to
+  PASS, and the matrix row is now `full`.
 - **`chat.message` write-back needs the pre-fill to be usable.** The first flight of #8 (write-back
   only) mounted but sanitized nothing: the V1 hook received EMPTY parts and had nothing to rewrite.
   The pre-fill (this PR) made it work end to end.
@@ -465,10 +502,10 @@ prompt text (idempotent for no-op hooks). `src/hooks.ts` + tests; `npm run check
 
 ### Honest scope of Proof 9
 
-- Proven: the packed-tarball bridge on a real host — **plugin passes** (superpowers, ascii,
-  personality-provisioned, sanitizer, snippets-provisioned) and **documented refusals**
-  (announcer, identity — shape crash; envsitter, ignore, command-inject — prerequisite/loud
-  chain), session-store write-back end to end, snapshot route, report sink, refusal honesty
+- Proven: the packed-tarball bridge on a real host — **5 plain passes** (superpowers, ascii,
+  sanitizer, announcer, identity), **2 provisioned passes** (personality, snippets), and
+  **3 documented refusals** (envsitter, ignore, command-inject — prerequisite/loud chain);
+  session-store write-back end to end, snapshot route, report sink, refusal honesty
   under load.
 - One model (opencode-go/deepseek-v4-flash#max), one host version (2.0.18), Windows. No Linux/macOS.
 - Evidence lives in `%TEMP%\opencode\bifrost-evidence\<plugin>\` — `REPORT.log`, transcripts,

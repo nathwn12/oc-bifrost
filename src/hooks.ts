@@ -157,6 +157,55 @@ export async function registerV1Hooks(
     reporter.record("permission.ask", "full", "permission evaluate effect")
   }
 
+  /* ---------------- experimental.chat.messages.transform ---------------- */
+  // Registered BEFORE the system.transform block: V1 plugins that pair the two
+  // (agent-identity) rely on messages.transform firing first, and V2 runs the
+  // session:context callbacks in registration order.
+  const messagesTransform = asHandler(table["experimental.chat.messages.transform"])
+  if (messagesTransform) {
+    await ctx.session.hook("context", async (event) => {
+      // Pre-fill the V1 {info, parts}[] envelope per V2 message so plugins that
+      // read `m.info.role` / `m.info.model` unguarded never crash. `model` is
+      // built from the real V2 Model.Ref shape (packages/schema/src/model.ts:18-22):
+      // `id` is the BARE model id and `providerID` is a separate field — the
+      // "providerID/modelID" string exists only in Model.Ref.parse. When both are
+      // strings they win; a string-only id falls back to splitting on the FIRST "/",
+      // so nested ids (openrouter/deepseek/deepseek-chat) keep the rest as modelID.
+      const v2Messages = (event.messages ?? []) as Array<Record<string, unknown>>
+      const output: { messages: Array<{ info: Record<string, unknown>; parts: unknown[] }> } = {
+        messages: v2Messages.map((message) => {
+          const info: Record<string, unknown> = { role: message.role }
+          if (message.id !== undefined) info.id = message.id
+          const sessionID = (message.sessionID as string | undefined) ?? (event.sessionID as string | undefined)
+          if (sessionID !== undefined) info.sessionID = sessionID
+          if (event.agent !== undefined) info.agent = event.agent
+          const modelRef = event.model as { id?: unknown; providerID?: unknown } | undefined
+          if (typeof modelRef?.providerID === "string" && typeof modelRef?.id === "string") {
+            info.model = { providerID: modelRef.providerID, modelID: modelRef.id }
+          } else if (typeof modelRef?.id === "string") {
+            const slash = modelRef.id.indexOf("/")
+            if (slash > 0) {
+              info.model = {
+                providerID: modelRef.id.slice(0, slash),
+                modelID: modelRef.id.slice(slash + 1),
+              }
+            }
+          }
+          const content = message.content
+          return { info, parts: Array.isArray(content) ? (content as unknown[]) : [] }
+        }),
+      }
+      await messagesTransform({ sessionID: event.sessionID }, output)
+      if (Array.isArray(output.messages)) {
+        event.messages = output.messages.map((m, i) => {
+          const original = v2Messages[i] ?? {}
+          return { ...original, content: Array.isArray(m.parts) ? m.parts : original.content }
+        })
+      }
+    })
+    reporter.record("experimental.chat.messages.transform", "full", "V2 Message[] -> V1 {info,parts}[] pre-fill; parts write-back to content")
+  }
+
   /* ---------------- experimental.chat.system.transform ---------------- */
   const systemTransform = asHandler(table["experimental.chat.system.transform"])
   if (systemTransform) {
@@ -169,16 +218,6 @@ export async function registerV1Hooks(
       }
     })
     reporter.record("experimental.chat.system.transform", "partial", "string[] <-> SystemPart[] conversion")
-  }
-
-  /* ---------------- experimental.chat.messages.transform ---------------- */
-  const messagesTransform = asHandler(table["experimental.chat.messages.transform"])
-  if (messagesTransform) {
-    await ctx.session.hook("context", async (event) => {
-      const output = { messages: (event.messages ?? []) as unknown[] }
-      await messagesTransform({}, output)
-    })
-    reporter.record("experimental.chat.messages.transform", "partial", "Message[] shape differs from V1 {info,parts}[]")
   }
 
   /* ---------------- experimental.session.compacting ---------------- */

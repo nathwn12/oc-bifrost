@@ -96,9 +96,9 @@ export const COMPAT_MATRIX: readonly MatrixRow[] = [
   },
   {
     hook: "experimental.chat.messages.transform",
-    level: "partial",
+    level: "full",
     v2: 'ctx.session.hook("context")',
-    test: "bridge: messages transform registers a context hook",
+    test: "bridge: messages transform round-trips the V1 {info,parts} envelope",
   },
   {
     hook: "experimental.session.compacting",

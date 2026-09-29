@@ -1,5 +1,39 @@
 # Changelog
 
+## 1.3.0 (2026-09-29)
+
+### Added
+
+- **The `client` facade now bridges the session domain it can actually reach.**
+  `client.session.messages` returns the V1 `{ data: [{ info, parts }] }` envelope from
+  `ctx.session.context`, preserving `role`, `modelID`, `providerID`, `tokens`, `time`,
+  `cost`, and `finish` - **partial: post-compaction history only**, because V2 exposes
+  the active context (messages after the last compaction) and the HTTP
+  `session.messages` route is unreachable from a plugin. The loss is stated on the
+  matrix row, not hidden.
+- **`session.idle` is synthesised from V2 `session.status[idle]`.** All other event
+  names and payloads pass through unchanged.
+- **Two facade calls stay refused, loudly:** `client.session.children` and
+  `client.tui.showToast`. V2 has no plugin-scoped child listing and no server-plugin
+  toast surface; each refusal cites the V2 boundary it cannot cross instead of
+  inventing one. A refusal is a feature.
+
+### Changed
+
+- **The token-tracker verdict is recorded, and the README matrix matches
+  `src/compat-matrix.ts`.** A live mount of `eserete/opencode-token-tracker@6a634805`
+  shows the synthesised `session.idle` reaching the tracker and its refused
+  `client.session.children` call swallowed by the tracker's own blanket catch
+  (`token-tracker.js:190-192`). `VERIFIED-PLUGINS.md`, `PROOF.md` (Proof 10), and the
+  README matrix now agree on the same totals: 6 `full`, 9 `partial`, 9 refused over
+  all 24 rows.
+
+### Checks
+
+- Tests green (`npm run check`), including the facade envelope round-trip, the loud
+  refusals, the `session.idle` translation, and an end-to-end mount of the real
+  cached `token-tracker.js`.
+
 ## 1.2.0 (2026-09-29)
 
 ### Added

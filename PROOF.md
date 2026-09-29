@@ -310,10 +310,12 @@ The bridge's own report, from the durable sink written inside the sandbox:
   `setup` early-returns unless `ctx.skill.transform` and `ctx.session.hook` are functions — the live
   host context supplies both (`@opencode/plugin/dist/promise/adapter.js:321,418`), so the body ran,
   not merely the early return.
-- **What this does not claim:** any *downstream* effect. The skills directory `setup` resolves was
-  absent in the sandbox, so it loaded zero skills and injected nothing — recorded as
-  "no observable effect in a headless run", never inferred. The plugin also swallows its own errors,
-  so a returned `setup` is not proof that a transform or a hook succeeded.
+- **What this does not claim:** any *downstream* effect. The skills directory `setup` resolves
+  (`../../skills` from the fetched module) does not exist — a single-file `github:` fetch carries no
+  sibling assets — so it loads zero skills and injects nothing. That is not "we could not see it": the
+  expected directory is measurably absent, re-checked in the live harness cache (Proof 7), where the
+  fetched module's directory holds only `plugin.ts` and `meta.json`. The plugin also swallows its own
+  errors, so a returned `setup` is not proof that a transform or a hook succeeded.
 
 Pack note: this run packed `nathwn12-oc-bifrost-1.1.0.tgz` at `b80f860` (84954 bytes, sha256
 `8fe69a2d…`); the executable bytes are the ones flown above at `54a1191` — the two packs differ only
@@ -328,6 +330,30 @@ in these docs.
 - Not exercised here: `preset:rtk`, Linux/macOS. Downstream effects of a V2 plugin's `setup` are not
   observable headlessly (the fixture above neither loaded a skill nor injected context).
 - One host version (2.0.18). Re-run on each OpenCode release before trusting it there.
+
+## Proof 7 — the PUBLISHED artifact, live in the operator's harness
+
+Proof 6 proved the *packed* tarball. This is the post-publish half: the bytes on npm, and the bridge
+running in the real harness rather than a sandbox.
+
+- **The published bytes are the flown bytes.** `dist/index.js`, `dist/sink.js`, `dist/github.js` and
+  `dist/hooks.js` in the tarball fetched back from the registry hash identically (sha256) to this
+  repo's build. The registry's own record agrees: `dist.integrity` equals the sha512 of the fetched
+  tarball, and `dist.fileCount` (69) / `dist.unpackedSize` (297090) match the local pack.
+- **It installs and resolves as a package.** `testflight <published .tgz>` → exit `0`, zero
+  failures, two warnings — both benign: `file://` URLs inside doc comments that *describe* the
+  `github:` route, and `C:/Users/you/...` example paths in this file and INSTALL.md.
+- **The real harness mounts it.** The global config's pin moved `1.0.1 → 1.1.0`; `opencode plugin list`
+  answers `oc.bifrost 1.1.0  @nathwn12/oc-bifrost@1.1.0`, and the durable sink wrote a fresh mount
+  report through the live host: `mounted v2:superpowers - V2 setup invoked with the host context`,
+  `mounted v1:RtkOpenCode`, `full tool.execute.before - mutable event.input write-back`. The feature
+  this release adds is what recorded its own adoption.
+- **Mounting is not running.** The same live cache shows superpowers' expected skills directory
+  measurably absent (`~/.cache/opencode/oc-bifrost/github/obra--superpowers--…/` holds only `plugin.ts`
+  and `meta.json`), so its V2 `setup` is inert as fetched — see Proof 6's note. RTK is the contrast:
+  hook-translated (`full tool.execute.before`), with a live spawn proof in Proof 4.
+- **Honest scope:** one host (2.0.18); no Linux/macOS run; a V2 `setup`'s downstream effects stay
+  unobservable headlessly, and `mounted` claims no more than Proof 6 says it does.
 
 ## Reproduce
 

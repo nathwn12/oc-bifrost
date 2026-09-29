@@ -1,5 +1,45 @@
 # Changelog
 
+## 1.2.0 (2026-09-29)
+
+### Added
+
+- **`github:` resolves plugins by repository snapshot.** The ref still resolves to a
+  commit once, at first fetch, but the download is now the **repository tarball from
+  codeload at that resolved commit**, materialized as a whole tree — the entry file is
+  imported from its real place inside it, so sibling files exist beside it (e.g.
+  `obra/superpowers` reads its own `skills/`). One request, no tree walk.
+- **Named caps, never truncation:** 16 MiB compressed · 64 MiB uncompressed · 5000
+  files. A breach degrades loudly; it never silently cuts a tree.
+- **Loud single-file fallback.** An over-cap, malformed, or candidate-less snapshot
+  still mounts via the old one-file fetch, but the mount note then says loudly that
+  sibling files are NOT available and a plugin that reads them by relative path is
+  inert — the downgrade is never silent.
+- **Hostile archives are refused outright, never materialized.** A path escape
+  (absolute, `..`, outside the top-level directory), NUL/backslash names, Windows
+  alternate-data-stream `:`, duplicate paths, or a link/device entry refuses the
+  snapshot — nothing is cached and nothing is executed.
+- **Cache layout `v2`, flat caches warned.** Snapshots live at
+  `~/.cache/opencode/oc-bifrost/github/v2/<id>/tree/`; a pre-snapshot single-file cache
+  at `…/github/<id>/` can never be mistaken for a snapshot — it is ignored with a
+  warning and re-fetched with the same one-time consent. `meta.json` now records the
+  tarball digest and the file/tree byte counts alongside the entry digest.
+
+### Fixed
+
+- **Archive reader NUL truncation could rename hostile input.** `readField` /
+  `readCString` trimmed at the first embedded NUL, so an entry named e.g.
+  `nul\0name.txt` silently became the Windows device name `nul`. Embedded NULs now
+  survive decoding and reach the validators, which refuse them; only trailing NUL
+  padding is trimmed. Numeric fields keep their spec truncation, and trailing-slash
+  directory markers are skipped rather than misread as files.
+
+### Checks
+
+- 181 tests green (`npm run check`) plus a real-repo end-to-end: the
+  `obra/superpowers@8ca22dba` snapshot materializes 229 files, with `skills/` readable
+  beside the entry.
+
 ## 1.1.0 (2026-09-29)
 
 ### Added

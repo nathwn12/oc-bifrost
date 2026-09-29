@@ -3,12 +3,15 @@ import assert from "node:assert/strict"
 import fs from "node:fs"
 import os from "node:os"
 import path from "node:path"
+import { gzipSync } from "node:zlib"
+import { randomBytes } from "node:crypto"
 import { pathToFileURL } from "node:url"
 import { githubCacheRoot, resolveSpec } from "../dist/index.js"
 import {
   assertInsideRoot,
   consentMessage,
   githubCacheId,
+  githubCacheLayoutRoot,
   githubLabel,
   mountNote,
   parseGithubSpec,
@@ -17,26 +20,37 @@ import {
   sha256Hex,
   validateCachePath,
 } from "../dist/github.js"
+import { entry, rawHeader, tar } from "./helpers/tar.js"
 
 /**
- * github: specifiers — mount a V1 plugin BY SOURCE, under the security
- * contract the review required:
+ * github: specifiers — mount a V1 plugin BY SOURCE under the security
+ * contract the review required, with the snapshot route in front:
  *
+ *   - snapshot-first: the repository tarball at the RESOLVED commit is
+ *     fetched in one request and materialized, so sibling files exist; the
+ *     single-file route is the LOUD fallback (over-cap, links, malformed,
+ *     missing candidates), never the default
+ *   - hostile archives are refused outright — no fallback from a repository
+ *     that serves a traversal attempt
  *   - consent: a cold cache refuses to fetch+execute without opt-in
  *   - cache first: a warm cache loads with ZERO fetch calls, no re-consent
- *   - immutable identity: the ref resolves to a commit, recorded in meta
+ *   - immutable identity: the ref resolves to a commit, recorded in meta, and
+ *     BOTH the tarball and the entry file carry digests; the entry digest is
+ *     verified on every later load
  *   - strict validation: no traversal, absolute paths, backslashes, encoded
- *     separators, control chars, or empty segments — URLs built from a fixed
- *     origin with component-aware encoding
- *   - fail closed offline; sanitized messages; size-capped, origin-pinned
- *     fetches; symlink/type-checked cache entries
+ *     separators, control chars, or empty segments; cache roots and entries
+ *     are never symlinks and never leave their root
+ *   - fail closed offline; sanitized messages; size-capped (incremental),
+ *     origin-pinned fetches
  *
  * All offline: the network surface is an injected fetchImpl, never the real
- * network (CI runs without one), and all state lives in tmp dirs.
+ * network, and all state lives in tmp dirs.
  */
 
 const SRC = 'export default { id: "demo", setup() {} }\n'
 const COMMIT = "abcdef1234567890abcdef1234567890abcdef12"
+const REPO = "superpowers"
+const TOP = `${REPO}-${COMMIT}`
 
 function tmpRoot() {
   return fs.mkdtempSync(path.join(os.tmpdir(), "oc-bifrost-github-test-"))
@@ -49,18 +63,38 @@ function noNetwork() {
   }
 }
 
+/** Build a gzipped codeload-style tarball from a repo-relative path -> content map. */
+function makeTarball(tree, top = TOP) {
+  const entries = Object.entries(tree).map(([filePath, content]) => {
+    const body = Buffer.from(content)
+    return { header: rawHeader({ name: filePath, prefix: top, size: body.length }), body }
+  })
+  return gzipSync(tar(...entries))
+}
+
 /**
- * A fake fetch standing in for the GitHub API (repo info + commit resolution)
- * and the raw content surface. `contents` maps an in-repo path to its bytes;
- * an unlisted raw path is a 404, like the real thing. `contentsAtCommit` is
- * served INSTEAD when the raw URL names the resolved commit — which the real
- * code always does — so a test can distinguish "fetched by ref" from "fetched
- * by commit". `defaultBranch: null` fails the repo info call;
- * `commitSha: null` fails commit resolution; `rawStatus` overrides the raw
- * status (e.g. 302 to exercise redirect refusals).
+ * A fake fetch for the GitHub API (repo info + commit resolution), the
+ * codeload snapshot surface, and the raw content surface.
+ *
+ * `tree` maps repo-relative paths to bytes and is what the TARBALL serves at
+ * every commit. `raw` maps repo-relative paths for the SINGLE-FILE fallback;
+ * an unlisted raw path is a 404. `rawStatus`/`tarballStatus` override the
+ * status of those two surfaces (e.g. 302 to exercise redirect refusals).
+ * `defaultBranch: null` fails the repo-info call; `commitSha: null` fails
+ * commit resolution.
  */
-function fakeFetch({ defaultBranch = "main", commitSha = COMMIT, contents = {}, contentsAtCommit, rawStatus = 200 } = {}) {
+function fakeFetch({
+  defaultBranch = "main",
+  commitSha = COMMIT,
+  tree = {},
+  raw = {},
+  rawStatus = 200,
+  tarballStatus = 200,
+} = {}) {
   const calls = []
+  // The top-level directory of a codeload tarball is `<repo>-<sha>` — it must
+  // match the REQUESTED repo, so it is derived from the URL per request.
+  const tarballs = new Map()
   const impl = async (url, init) => {
     calls.push({ url, init })
     if (url.startsWith("https://api.github.com/repos/")) {
@@ -72,11 +106,25 @@ function fakeFetch({ defaultBranch = "main", commitSha = COMMIT, contents = {}, 
       if (defaultBranch === null) return { ok: false, status: 404, text: async () => "", json: async () => ({}) }
       return { ok: true, status: 200, text: async () => "", json: async () => ({ default_branch: defaultBranch }) }
     }
-    const raw = url.match(/^https:\/\/raw\.githubusercontent\.com\/([^/]+)\/([^/]+)\/([^/]+)\/(.+)$/)
-    if (raw) {
+    if (url.startsWith("https://codeload.github.com/")) {
+      if (tarballStatus !== 200) return { ok: false, status: tarballStatus, text: async () => "", json: async () => ({}) }
+      const match = url.match(/^https:\/\/codeload\.github\.com\/([^/]+)\/([^/]+)\/tar\.gz\/([0-9a-f]{40})$/)
+      if (!match) return { ok: false, status: 404, text: async () => "", json: async () => ({}) }
+      const key = `${match[1]}/${match[2]}@${match[3]}`
+      if (!tarballs.has(key)) tarballs.set(key, makeTarball(tree, `${match[2]}-${match[3]}`))
+      const tarball = tarballs.get(key)
+      return {
+        ok: true,
+        status: 200,
+        text: async () => "",
+        json: async () => ({}),
+        arrayBuffer: async () => tarball.buffer.slice(tarball.byteOffset, tarball.byteOffset + tarball.byteLength),
+      }
+    }
+    const rawMatch = url.match(/^https:\/\/raw\.githubusercontent\.com\/([^/]+)\/([^/]+)\/([^/]+)\/(.+)$/)
+    if (rawMatch) {
       if (rawStatus !== 200) return { ok: false, status: rawStatus, text: async () => "", json: async () => ({}) }
-      const pool = raw[3] === commitSha && contentsAtCommit ? contentsAtCommit : contents
-      const content = pool[raw[4]]
+      const content = raw[rawMatch[4]]
       if (content === undefined) return { ok: false, status: 404, text: async () => "", json: async () => ({}) }
       return { ok: true, status: 200, text: async () => content, json: async () => ({}) }
     }
@@ -91,19 +139,13 @@ const SPECS = {
   full: { owner: "rtk-ai", repo: "rtk", ref: "v0.50.0", path: "hooks/opencode/rtk.ts" },
 }
 
-function expectedMeta(overrides) {
-  return {
-    source: "github",
-    owner: "obra",
-    repo: "superpowers",
-    ref: "main",
-    resolvedCommit: COMMIT,
-    path: "hooks/opencode/superpowers.ts",
-    sha256: sha256Hex(SRC),
-    bytes: Buffer.byteLength(SRC, "utf8"),
-    fetchedAt: new Date(0).toISOString(),
-    ...overrides,
-  }
+/** The default fixture tree happens to satisfy the bare spec's first candidate. */
+const TREE = { "hooks/opencode/superpowers.ts": SRC }
+const RAW = { "hooks/opencode/superpowers.ts": SRC }
+
+/** Cache entry dir for a spec under a root: `<root>/v2/<id>`. */
+function cacheDirFor(root, spec) {
+  return path.join(githubCacheLayoutRoot(root), githubCacheId(spec))
 }
 
 /* ---- strict spec validation ---- */
@@ -217,15 +259,16 @@ test("cache-path boundary: an EMPTY symlinked entry directory is refused before 
     // A link pointing OUTSIDE the root, with NO marker files: the cold-cache
     // check sees neither plugin.ts nor meta.json, so this is exactly the case
     // where an unchecked fetch path would write THROUGH the link.
-    fs.symlinkSync(target, path.join(root, githubCacheId(SPECS.bare)), "junction")
-    const impl = fakeFetch({ contents: { "hooks/opencode/superpowers.ts": SRC } })
+    fs.mkdirSync(githubCacheLayoutRoot(root), { recursive: true })
+    fs.symlinkSync(target, cacheDirFor(root, SPECS.bare), "junction")
+    const impl = fakeFetch({ tree: TREE })
     await assert.rejects(
       () => resolveGithubPlugin(SPECS.bare, { cacheRoot: root, fetchImpl: impl, trusted: true }),
       /symlink, and cache writes must never follow one/,
     )
     assert.equal(impl.calls.length, 0, "the boundary must fire before ANY fetch")
     assert.equal(fs.readdirSync(target).length, 0, "nothing may be written through the link, outside the root")
-    assert.deepEqual(fs.readdirSync(root), [githubCacheId(SPECS.bare)], "the refused entry must gain nothing inside the root either")
+    assert.deepEqual(fs.readdirSync(githubCacheLayoutRoot(root)), [githubCacheId(SPECS.bare)], "the refused entry must gain nothing inside the root either")
   } finally {
     fs.rmSync(root, { recursive: true, force: true })
     fs.rmSync(target, { recursive: true, force: true })
@@ -235,7 +278,7 @@ test("cache-path boundary: an EMPTY symlinked entry directory is refused before 
 test("cache-path boundary: a symlinked cache ROOT and a file-shaped entry are refused", async () => {
   const realRoot = fs.mkdtempSync(path.join(os.tmpdir(), "oc-bifrost-github-root-target-"))
   const linkedRootParent = tmpRoot()
-  const entryRoot = tmpRoot()
+  const entryParent = tmpRoot()
   try {
     const linkedRoot = path.join(linkedRootParent, "linked-root")
     fs.symlinkSync(realRoot, linkedRoot, "junction")
@@ -243,16 +286,17 @@ test("cache-path boundary: a symlinked cache ROOT and a file-shaped entry are re
       () => resolveGithubPlugin(SPECS.bare, { cacheRoot: linkedRoot, fetchImpl: noNetwork(), trusted: true }),
       /cache root.*symlink/,
     )
-    // The cache ENTRY itself is a regular file, not a directory.
-    fs.writeFileSync(path.join(entryRoot, githubCacheId(SPECS.bare)), "not a directory")
+    const cacheDir = cacheDirFor(entryParent, SPECS.bare)
+    fs.mkdirSync(path.dirname(cacheDir), { recursive: true })
+    fs.writeFileSync(cacheDir, "not a directory")
     await assert.rejects(
-      () => resolveGithubPlugin(SPECS.bare, { cacheRoot: entryRoot, fetchImpl: noNetwork(), trusted: true }),
+      () => resolveGithubPlugin(SPECS.bare, { cacheRoot: entryParent, fetchImpl: noNetwork(), trusted: true }),
       /entry.*is not a directory/,
     )
   } finally {
     fs.rmSync(realRoot, { recursive: true, force: true })
     fs.rmSync(linkedRootParent, { recursive: true, force: true })
-    fs.rmSync(entryRoot, { recursive: true, force: true })
+    fs.rmSync(entryParent, { recursive: true, force: true })
   }
 })
 
@@ -270,7 +314,7 @@ test("remoteTrustEnabled: an explicit option wins over the env; the env consents
 test("consent: a cold cache without opt-in refuses BEFORE fetching anything", async () => {
   const root = tmpRoot()
   try {
-    const impl = fakeFetch({ contents: { "hooks/opencode/superpowers.ts": SRC } })
+    const impl = fakeFetch({ tree: TREE })
     await assert.rejects(() => resolveGithubPlugin(SPECS.bare, { cacheRoot: root, fetchImpl: impl }), (error) => {
       assert.match(error.message, /cold cache, first use/)
       assert.match(error.message, /github:obra\/superpowers/)
@@ -291,82 +335,134 @@ test("consent: the refusal message names what is about to be fetched and the exa
   const message = consentMessage(SPECS.bare)
   assert.match(message, /^\[oc-bifrost\] refusing to fetch/)
   assert.match(message, /from https:\/\/github\.com\/obra\/superpowers/)
-  assert.match(message, /EXECUTE it with this host process's full user rights/)
+  assert.match(message, /EXECUTE its entry file with this host process's full user rights/)
   assert.match(message, /Nothing was fetched and nothing was executed/)
 })
 
-/* ---- cold fetch (consented) ---- */
+/* ---- cold fetch (consented): the snapshot route ---- */
 
-test("resolveGithubPlugin: a cold cache WITH opt-in fetches, records resolvedCommit + sha256", async () => {
+test("resolveGithubPlugin: a cold cache WITH opt-in fetches the repository SNAPSHOT by commit and records provenance", async () => {
   const root = tmpRoot()
   try {
-    const impl = fakeFetch({ contents: { "hooks/opencode/superpowers.ts": SRC } })
+    const impl = fakeFetch({ tree: TREE })
     const result = await resolveGithubPlugin(SPECS.bare, { cacheRoot: root, fetchImpl: impl, trusted: true, now: () => new Date(0) })
 
     assert.equal(result.fetched, true)
-    const cacheDir = path.join(root, fs.readdirSync(root)[0])
-    assert.equal(result.url, pathToFileURL(path.join(cacheDir, "plugin.ts")).href)
-    assert.equal(fs.readFileSync(path.join(cacheDir, "plugin.ts"), "utf8"), SRC)
+    const cacheDir = cacheDirFor(root, SPECS.bare)
+    const entryFile = path.join(cacheDir, "tree", "hooks", "opencode", "superpowers.ts")
+    assert.equal(result.url, pathToFileURL(entryFile).href)
+    assert.equal(fs.readFileSync(entryFile, "utf8"), SRC)
+    assert.equal(fs.existsSync(path.join(cacheDir, "tree", "hooks", "opencode", "superpowers.ts")), true, "the entry must sit at its repo-relative path inside the tree")
 
     const meta = JSON.parse(fs.readFileSync(path.join(cacheDir, "meta.json"), "utf8"))
-    assert.deepEqual(meta, expectedMeta({}))
+    assert.equal(meta.layout, "snapshot")
+    assert.equal(meta.owner, "obra")
+    assert.equal(meta.repo, "superpowers")
+    assert.equal(meta.ref, "main")
+    assert.equal(meta.path, "hooks/opencode/superpowers.ts")
+    assert.equal(meta.sha256, sha256Hex(SRC))
+    assert.equal(meta.bytes, Buffer.byteLength(SRC, "utf8"))
     assert.match(meta.resolvedCommit, /^[0-9a-f]{40}$/)
+    assert.match(meta.tarballSha256, /^[0-9a-f]{64}$/, "the tarball digest must be recorded")
+    assert.equal(typeof meta.tarballBytes, "number")
+    assert.equal(meta.files, Object.keys(TREE).length)
+    assert.equal(typeof meta.treeBytes, "number")
+    assert.equal(meta.fetchedAt, new Date(0).toISOString())
 
-    // fetch hardening plumbing: fixed origin, commit-anchored URL, abort
-    // signal, redirects forbidden
-    const rawCall = impl.calls.find((call) => call.url.startsWith("https://raw.githubusercontent.com/"))
+    const tarballCall = impl.calls.find((call) => call.url.startsWith("https://codeload.github.com/"))
     assert.match(
-      rawCall.url,
-      new RegExp(`^https://raw\\.githubusercontent\\.com/obra/superpowers/${COMMIT}/hooks/opencode/superpowers\\.ts$`),
-      "the raw content must be fetched BY the resolved commit",
+      tarballCall.url,
+      new RegExp(`^https://codeload\\.github\\.com/obra/superpowers/tar\\.gz/${COMMIT}$`),
+      "the snapshot must be fetched BY the resolved commit",
     )
-    assert.equal(rawCall.init.redirect, "error", "redirects must be forbidden at the fetch layer")
-    assert.ok(rawCall.init.signal instanceof AbortSignal, "fetch must receive a timeout signal")
-  } finally {
-    fs.rmSync(root, { recursive: true, force: true })
-  }
-})
-
-test("resolveGithubPlugin: a warm cache loads WITHOUT opt-in and with ZERO fetch calls", async () => {
-  const root = tmpRoot()
-  try {
-    const first = await resolveGithubPlugin(SPECS.bare, {
-      cacheRoot: root,
-      fetchImpl: fakeFetch({ contents: { "hooks/opencode/superpowers.ts": SRC } }),
-      trusted: true,
-    })
-    const second = await resolveGithubPlugin(SPECS.bare, { cacheRoot: root, fetchImpl: noNetwork(), trusted: false })
-    assert.equal(second.fetched, false, "the second resolve must be a cache hit")
-    assert.equal(second.url, first.url)
-    assert.equal(second.meta.sha256, first.meta.sha256)
-    assert.equal(second.meta.resolvedCommit, COMMIT, "the resolved commit survives to later loads")
-  } finally {
-    fs.rmSync(root, { recursive: true, force: true })
-  }
-})
-
-test("resolveGithubPlugin: raw bytes are fetched BY the resolved commit (a moving ref cannot split meta from bytes)", async () => {
-  const root = tmpRoot()
-  try {
-    const impl = fakeFetch({
-      // What the REF name would serve after it moved upstream:
-      contents: { "hooks/opencode/superpowers.ts": "bytes the ref would serve after it moved\n" },
-      // What the COMMIT the ref resolved to actually holds:
-      contentsAtCommit: { "hooks/opencode/superpowers.ts": SRC },
-    })
-    const result = await resolveGithubPlugin(SPECS.bare, { cacheRoot: root, fetchImpl: impl, trusted: true })
-    const cacheDir = path.join(root, fs.readdirSync(root)[0])
+    assert.equal(tarballCall.init.redirect, "error", "redirects must be forbidden at the fetch layer")
+    assert.ok(tarballCall.init.signal instanceof AbortSignal, "fetch must receive a timeout signal")
     assert.equal(
-      fs.readFileSync(path.join(cacheDir, "plugin.ts"), "utf8"),
-      SRC,
-      "the cached bytes must be the commit's snapshot, not whatever the ref name now serves",
+      impl.calls.some((call) => call.url.startsWith("https://raw.githubusercontent.com/")),
+      false,
+      "a successful snapshot must never hit the raw surface",
     )
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true })
+  }
+})
+
+test("resolveGithubPlugin: SIBLING files materialize beside the entry (the point of the route)", async () => {
+  const root = tmpRoot()
+  try {
+    const tree = {
+      ".opencode/plugins/superpowers.js": 'export default { id: "superpowers", setup() {} }\n',
+      "skills/using-superpowers/SKILL.md": "# Using superpowers\n",
+      "skills/brainstorming/SKILL.md": "# Brainstorming\n",
+      "README.md": "the repository README\n",
+    }
+    const impl = fakeFetch({ tree })
+    const result = await resolveGithubPlugin(
+      { owner: "obra", repo: "superpowers", ref: "v6.4.2", path: ".opencode/plugins/superpowers.js" },
+      { cacheRoot: root, fetchImpl: impl, trusted: true },
+    )
+    const cacheDir = cacheDirFor(root, { owner: "obra", repo: "superpowers", ref: "v6.4.2", path: ".opencode/plugins/superpowers.js" })
+    for (const sibling of Object.keys(tree)) {
+      assert.equal(fs.existsSync(path.join(cacheDir, "tree", ...sibling.split("/"))), true, `sibling ${sibling} must materialize`)
+    }
+    assert.equal(result.url, pathToFileURL(path.join(cacheDir, "tree", ".opencode", "plugins", "superpowers.js")).href)
     const meta = JSON.parse(fs.readFileSync(path.join(cacheDir, "meta.json"), "utf8"))
-    assert.equal(meta.sha256, sha256Hex(SRC), "the recorded digest must describe the bytes actually cached")
-    assert.equal(meta.resolvedCommit, COMMIT)
-    const rawCall = impl.calls.find((call) => call.url.startsWith("https://raw.githubusercontent.com/"))
-    assert.match(rawCall.url, new RegExp(`/${COMMIT}/`), "the raw URL must name the commit")
-    assert.doesNotMatch(rawCall.url, /\/main\//, "the raw URL must not name the ref")
+    assert.equal(meta.layout, "snapshot")
+    assert.equal(meta.files, Object.keys(tree).length)
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true })
+  }
+})
+
+test("resolveGithubPlugin: the snapshot probe finds the candidate entirely IN THE TREE (zero raw calls)", async () => {
+  const root = tmpRoot()
+  try {
+    const impl = fakeFetch({ tree: TREE })
+    const result = await resolveGithubPlugin(SPECS.bare, { cacheRoot: root, fetchImpl: impl, trusted: true })
+    assert.equal(result.meta.path, "hooks/opencode/superpowers.ts")
+    assert.equal(impl.calls.filter((call) => call.url.startsWith("https://raw.githubusercontent.com/")).length, 0)
+    assert.equal(impl.calls.filter((call) => call.url.startsWith("https://codeload.github.com/")).length, 1)
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true })
+  }
+})
+
+test("resolveGithubPlugin: a tarball whose paths use the ustar PREFIX field materializes fully", async () => {
+  const root = tmpRoot()
+  try {
+    // name <= 100 chars, prefix (incl. the <repo>-<sha>/ segment) <= 155 chars:
+    // this fixture is built at the actual boundary of ustar's split fields.
+    const REST = "segment/".repeat(12).slice(0, -1) // 95 chars
+    const NAME = "superpowers.ts" // 14 chars
+    const LONG = `${REST}/${NAME}`
+    const split = LONG.lastIndexOf("/")
+    assert.ok(LONG.length > 100, "the fixture must actually exceed the 100-byte name field")
+    assert.ok(TOP.length + 1 + LONG.slice(0, split).length <= 155, "the prefix field itself must stay in bounds")
+    const entries = [
+      { header: rawHeader({ name: "hooks/opencode/superpowers.ts", prefix: TOP, size: Buffer.byteLength(SRC) }), body: Buffer.from(SRC) },
+      { header: rawHeader({ name: NAME, prefix: `${TOP}/${LONG.slice(0, split)}`, size: Buffer.byteLength(SRC) }), body: Buffer.from(SRC) },
+    ]
+    const tarball = gzipSync(tar(...entries))
+    const callImpl = async (url, init) => {
+      if (url.startsWith("https://codeload.github.com/")) {
+        return {
+          ok: true,
+          status: 200,
+          text: async () => "",
+          json: async () => ({}),
+          arrayBuffer: async () => tarball.buffer.slice(tarball.byteOffset, tarball.byteOffset + tarball.byteLength),
+        }
+      }
+      return fakeFetch({ tree: TREE, raw: RAW })(url, init)
+    }
+    const result = await resolveGithubPlugin(
+      { owner: "obra", repo: "superpowers", path: LONG },
+      { cacheRoot: root, fetchImpl: callImpl, trusted: true },
+    )
+    const cacheDir = cacheDirFor(root, { owner: "obra", repo: "superpowers", path: LONG })
+    const materialized = path.join(cacheDir, "tree", ...LONG.split("/"))
+    assert.equal(fs.existsSync(materialized), true, "the prefixed entry must materialize at its full path")
+    assert.equal(result.meta.path, LONG)
   } finally {
     fs.rmSync(root, { recursive: true, force: true })
   }
@@ -375,7 +471,7 @@ test("resolveGithubPlugin: raw bytes are fetched BY the resolved commit (a movin
 test("resolveGithubPlugin: an explicit ref skips the default-branch lookup but still resolves the commit", async () => {
   const root = tmpRoot()
   try {
-    const impl = fakeFetch({ contents: { "hooks/opencode/rtk.ts": SRC } })
+    const impl = fakeFetch({ tree: { "hooks/opencode/rtk.ts": SRC } })
     const result = await resolveGithubPlugin(SPECS.full, { cacheRoot: root, fetchImpl: impl, trusted: true })
     assert.equal(result.meta.ref, "v0.50.0")
     assert.equal(result.meta.resolvedCommit, COMMIT)
@@ -396,7 +492,7 @@ test("resolveGithubPlugin: an explicit ref skips the default-branch lookup but s
 test("resolveGithubPlugin: a missing ref defaults to the repo default branch (branch + commit resolved)", async () => {
   const root = tmpRoot()
   try {
-    const impl = fakeFetch({ defaultBranch: "develop", contents: { "hooks/opencode/superpowers.ts": SRC } })
+    const impl = fakeFetch({ defaultBranch: "develop", tree: TREE })
     const result = await resolveGithubPlugin(SPECS.bare, { cacheRoot: root, fetchImpl: impl, trusted: true })
     assert.equal(result.meta.ref, "develop")
     assert.equal(result.meta.resolvedCommit, COMMIT)
@@ -404,9 +500,118 @@ test("resolveGithubPlugin: a missing ref defaults to the repo default branch (br
     assert.equal(apiCalls.length, 2, "one repo-info call + one commit-resolution call")
     assert.ok(apiCalls.some((call) => /\/repos\/obra\/superpowers$/.test(call.url)))
     assert.ok(apiCalls.some((call) => /\/repos\/obra\/superpowers\/commits\/develop$/.test(call.url)))
+    const tarballCall = impl.calls.find((call) => call.url.startsWith("https://codeload.github.com/"))
+    assert.match(tarballCall.url, new RegExp(`/obra/superpowers/tar\\.gz/${COMMIT}$`), "content is fetched by the resolved commit, never the branch name")
+    assert.doesNotMatch(tarballCall.url, /\/develop\//)
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true })
+  }
+})
+
+/* ---- the loud single-file fallback ---- */
+
+test("resolveGithubPlugin: a snapshot lacking every candidate falls back to single-file, named in meta", async () => {
+  const root = tmpRoot()
+  try {
+    const impl = fakeFetch({ tree: {}, raw: RAW })
+    const result = await resolveGithubPlugin(SPECS.bare, { cacheRoot: root, fetchImpl: impl, trusted: true })
+    assert.equal(result.meta.layout, "single-file")
+    assert.match(result.meta.snapshotFallback, /none of the candidate plugin paths is present/)
+    const cacheDir = cacheDirFor(root, SPECS.bare)
+    assert.equal(fs.readFileSync(path.join(cacheDir, "plugin.ts"), "utf8"), SRC, "the fallback caches the raw file")
     const rawCalls = impl.calls.filter((call) => call.url.startsWith("https://raw.githubusercontent.com/"))
-    assert.match(rawCalls[0].url, new RegExp(`/obra/superpowers/${COMMIT}/`), "content is fetched by the resolved commit, not the branch name")
-    assert.doesNotMatch(rawCalls[0].url, /\/develop\//)
+    assert.equal(rawCalls.length, 1, "the successful fallback probes exactly one path")
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true })
+  }
+})
+
+test("resolveGithubPlugin: an over-cap tarball falls back to single-file with the loss named in meta", async () => {
+  const root = tmpRoot()
+  try {
+    const impl = fakeFetch({ tree: TREE, raw: RAW })
+    const result = await resolveGithubPlugin(SPECS.bare, {
+      cacheRoot: root,
+      fetchImpl: impl,
+      trusted: true,
+      limits: { tarballBytes: 1 },
+    })
+    assert.equal(result.meta.layout, "single-file")
+    assert.match(result.meta.snapshotFallback, /exceeded the 1-byte download cap/)
+    assert.equal(fs.readFileSync(path.join(cacheDirFor(root, SPECS.bare), "plugin.ts"), "utf8"), SRC)
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true })
+  }
+})
+
+test("resolveGithubPlugin: a link entry in the tarball falls back loudly (never materialized)", async () => {
+  const root = tmpRoot()
+  try {
+    const body = Buffer.from("target")
+    const link = { header: rawHeader({ name: "evil-link", prefix: TOP, type: "2", linkname: "../../outside" }), body }
+    const tarball = gzipSync(tar({ header: rawHeader({ name: "hooks/opencode/superpowers.ts", prefix: TOP, size: Buffer.byteLength(SRC) }), body: Buffer.from(SRC) }, link))
+    const impl = async (url, init) => {
+      if (url.startsWith("https://codeload.github.com/")) {
+        return { ok: true, status: 200, text: async () => "", json: async () => ({}), arrayBuffer: async () => tarball.buffer.slice(tarball.byteOffset, tarball.byteOffset + tarball.byteLength) }
+      }
+      return fakeFetch({ tree: TREE, raw: RAW })(url, init)
+    }
+    const result = await resolveGithubPlugin(SPECS.bare, { cacheRoot: root, fetchImpl: impl, trusted: true })
+    assert.equal(result.meta.layout, "single-file")
+    assert.match(result.meta.snapshotFallback, /refused/)
+    assert.equal(fs.existsSync(path.join(cacheDirFor(root, SPECS.bare), "tree")), false, "no partial tree may materialize")
+    assert.equal(fs.existsSync(path.join(cacheDirFor(root, SPECS.bare), "tree")), false)
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true })
+  }
+})
+
+test("resolveGithubPlugin: a HOSTILE archive (traversal) is refused outright — no fallback, nothing cached", async () => {
+  const root = tmpRoot()
+  try {
+    const hostile = { header: rawHeader({ name: "../../escape.ts", prefix: TOP, size: Buffer.byteLength("pwned") }), body: Buffer.from("pwned") }
+    const tarball = gzipSync(tar(hostile))
+    const calls = []
+    const impl = async (url, init) => {
+      calls.push({ url, init })
+      if (url.startsWith("https://codeload.github.com/")) {
+        return { ok: true, status: 200, text: async () => "", json: async () => ({}), arrayBuffer: async () => tarball.buffer.slice(tarball.byteOffset, tarball.byteOffset + tarball.byteLength) }
+      }
+      return fakeFetch({ tree: TREE, raw: RAW })(url, init)
+    }
+    await assert.rejects(
+      () => resolveGithubPlugin(SPECS.bare, { cacheRoot: root, fetchImpl: impl, trusted: true }),
+      (error) => {
+        assert.match(error.message, /refusing the repository snapshot/)
+        assert.match(error.message, /never used/)
+        assert.match(error.message, /nothing was cached and nothing was executed/)
+        return true
+      },
+    )
+    assert.equal(
+      calls.some((call) => call.url.startsWith("https://raw.githubusercontent.com/")),
+      false,
+      "a hostile archive must never degrade to the single-file route",
+    )
+    assert.equal(fs.readdirSync(root).length, 0, "nothing may be cached")
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true })
+  }
+})
+
+test("resolveGithubPlugin: a pre-snapshot FLAT cache is never read as a snapshot and names the warning", async () => {
+  const root = tmpRoot()
+  try {
+    const legacyDir = path.join(root, githubCacheId(SPECS.bare))
+    fs.mkdirSync(legacyDir, { recursive: true })
+    fs.writeFileSync(path.join(legacyDir, "plugin.ts"), SRC)
+    fs.writeFileSync(path.join(legacyDir, "meta.json"), JSON.stringify({ layout: "single-file" }))
+    const impl = fakeFetch({ tree: TREE })
+    const result = await resolveGithubPlugin(SPECS.bare, { cacheRoot: root, fetchImpl: impl, trusted: true })
+    assert.ok(Array.isArray(result.warnings) && result.warnings.length === 1, "the legacy cache must be named out loud")
+    assert.match(result.warnings[0], /pre-snapshot single-file cache/)
+    assert.equal(fs.readFileSync(path.join(legacyDir, "plugin.ts"), "utf8"), SRC, "the legacy cache must remain untouched")
+    assert.equal(result.meta.layout, "snapshot")
   } finally {
     fs.rmSync(root, { recursive: true, force: true })
   }
@@ -414,20 +619,57 @@ test("resolveGithubPlugin: a missing ref defaults to the repo default branch (br
 
 /* ---- immutable identity / no silent replacement ---- */
 
+test("resolveGithubPlugin: the tarball is fetched BY the resolved commit (a moving ref cannot split meta from bytes)", async () => {
+  const root = tmpRoot()
+  try {
+    const impl = fakeFetch({ tree: TREE })
+    const result = await resolveGithubPlugin(SPECS.bare, { cacheRoot: root, fetchImpl: impl, trusted: true })
+    const cacheDir = cacheDirFor(root, SPECS.bare)
+    assert.equal(fs.readFileSync(path.join(cacheDir, "tree", "hooks", "opencode", "superpowers.ts"), "utf8"), SRC)
+    const meta = JSON.parse(fs.readFileSync(path.join(cacheDir, "meta.json"), "utf8"))
+    assert.equal(meta.sha256, sha256Hex(SRC), "the recorded digest must describe the bytes actually cached")
+    assert.equal(meta.resolvedCommit, COMMIT)
+    const tarballCall = impl.calls.find((call) => call.url.startsWith("https://codeload.github.com/"))
+    assert.match(tarballCall.url, new RegExp(`/tar\\.gz/${COMMIT}$`), "the tarball URL must name the commit")
+    assert.doesNotMatch(tarballCall.url, /\/main\//, "the tarball URL must not name the ref")
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true })
+  }
+})
+
+test("resolveGithubPlugin: a warm cache loads WITHOUT opt-in and with ZERO fetch calls, entry digest verified", async () => {
+  const root = tmpRoot()
+  try {
+    const first = await resolveGithubPlugin(SPECS.bare, {
+      cacheRoot: root,
+      fetchImpl: fakeFetch({ tree: TREE }),
+      trusted: true,
+    })
+    const second = await resolveGithubPlugin(SPECS.bare, { cacheRoot: root, fetchImpl: noNetwork(), trusted: false })
+    assert.equal(second.fetched, false, "the second resolve must be a cache hit")
+    assert.equal(second.url, first.url)
+    assert.equal(second.meta.sha256, first.meta.sha256)
+    assert.equal(second.meta.resolvedCommit, COMMIT, "the resolved commit survives to later loads")
+    assert.equal(second.meta.layout, "snapshot")
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true })
+  }
+})
+
 test("resolveGithubPlugin: a sha256 mismatch refuses, fetches nothing, and does NOT overwrite the cache", async () => {
   const root = tmpRoot()
   try {
     await resolveGithubPlugin(SPECS.bare, {
       cacheRoot: root,
-      fetchImpl: fakeFetch({ contents: { "hooks/opencode/superpowers.ts": SRC } }),
+      fetchImpl: fakeFetch({ tree: TREE }),
       trusted: true,
     })
-    const cacheDir = path.join(root, fs.readdirSync(root)[0])
-    const pluginFile = path.join(cacheDir, "plugin.ts")
+    const cacheDir = cacheDirFor(root, SPECS.bare)
+    const entryFile = path.join(cacheDir, "tree", "hooks", "opencode", "superpowers.ts")
     const metaBefore = fs.readFileSync(path.join(cacheDir, "meta.json"), "utf8")
-    fs.writeFileSync(pluginFile, "tampered bytes\n", "utf8")
+    fs.writeFileSync(entryFile, "tampered bytes\n", "utf8")
 
-    const impl = fakeFetch({ contents: { "hooks/opencode/superpowers.ts": "fresh bytes\n" } })
+    const impl = fakeFetch({ tree: { "hooks/opencode/superpowers.ts": "fresh bytes\n" } })
     await assert.rejects(() => resolveGithubPlugin(SPECS.bare, { cacheRoot: root, fetchImpl: impl, trusted: true }), (error) => {
       assert.match(error.message, /sha256/)
       assert.match(error.message, /recorded [0-9a-f]{64}, computed [0-9a-f]{64}/)
@@ -435,27 +677,27 @@ test("resolveGithubPlugin: a sha256 mismatch refuses, fetches nothing, and does 
       return true
     })
     assert.equal(impl.calls.length, 0, "a mismatch must never re-fetch")
-    assert.equal(fs.readFileSync(pluginFile, "utf8"), "tampered bytes\n", "the cache must not be overwritten")
+    assert.equal(fs.readFileSync(entryFile, "utf8"), "tampered bytes\n", "the cache must not be overwritten")
     assert.equal(fs.readFileSync(path.join(cacheDir, "meta.json"), "utf8"), metaBefore)
   } finally {
     fs.rmSync(root, { recursive: true, force: true })
   }
 })
 
-test("resolveGithubPlugin: a cache with provenance but no plugin file refuses (never silently re-fetched)", async () => {
+test("resolveGithubPlugin: a cache with provenance but no entry file refuses (never silently re-fetched)", async () => {
   const root = tmpRoot()
   try {
     await resolveGithubPlugin(SPECS.bare, {
       cacheRoot: root,
-      fetchImpl: fakeFetch({ contents: { "hooks/opencode/superpowers.ts": SRC } }),
+      fetchImpl: fakeFetch({ tree: TREE }),
       trusted: true,
     })
-    const cacheDir = path.join(root, fs.readdirSync(root)[0])
-    fs.rmSync(path.join(cacheDir, "plugin.ts"))
-    const impl = fakeFetch({ contents: { "hooks/opencode/superpowers.ts": SRC } })
+    const cacheDir = cacheDirFor(root, SPECS.bare)
+    fs.rmSync(path.join(cacheDir, "tree", "hooks", "opencode", "superpowers.ts"))
+    const impl = fakeFetch({ tree: TREE })
     await assert.rejects(
       () => resolveGithubPlugin(SPECS.bare, { cacheRoot: root, fetchImpl: impl, trusted: true }),
-      /plugin file.*unreadable|is not a regular file/,
+      /entry file.*unreadable/,
     )
     assert.equal(impl.calls.length, 0, "a broken cache must never be silently re-fetched")
   } finally {
@@ -463,19 +705,30 @@ test("resolveGithubPlugin: a cache with provenance but no plugin file refuses (n
   }
 })
 
-test("resolveGithubPlugin: a cache without its provenance record refuses loudly", async () => {
+test("resolveGithubPlugin: a snapshot cache without its provenance is never loaded as verified", async () => {
   const root = tmpRoot()
   try {
     await resolveGithubPlugin(SPECS.bare, {
       cacheRoot: root,
-      fetchImpl: fakeFetch({ contents: { "hooks/opencode/superpowers.ts": SRC } }),
+      fetchImpl: fakeFetch({ tree: TREE }),
       trusted: true,
     })
-    const cacheDir = path.join(root, fs.readdirSync(root)[0])
+    const cacheDir = cacheDirFor(root, SPECS.bare)
     fs.rmSync(path.join(cacheDir, "meta.json"))
+    // Without consent it is a cold cache and refuses before any fetch.
     await assert.rejects(
       () => resolveGithubPlugin(SPECS.bare, { cacheRoot: root, fetchImpl: noNetwork(), trusted: false }),
-      /provenance record/,
+      /cold cache, first use/,
+    )
+    // With consent, the orphaned tree is never overwritten — the write path refuses it.
+    await assert.rejects(
+      () => resolveGithubPlugin(SPECS.bare, { cacheRoot: root, fetchImpl: fakeFetch({ tree: TREE }), trusted: true }),
+      (error) => {
+        assert.match(error.message, /could not write the github: cache/)
+        assert.match(error.message, /refusing to write the snapshot cache/)
+        assert.match(error.message, /"tree" directory is already present/)
+        return true
+      },
     )
   } finally {
     fs.rmSync(root, { recursive: true, force: true })
@@ -486,9 +739,12 @@ test("resolveGithubPlugin: a symlinked cache entry is refused", async () => {
   const root = tmpRoot()
   const target = fs.mkdtempSync(path.join(os.tmpdir(), "oc-bifrost-github-target-"))
   try {
-    fs.writeFileSync(path.join(target, "plugin.ts"), SRC)
+    fs.mkdirSync(path.join(target, "tree", "hooks", "opencode"), { recursive: true })
+    fs.writeFileSync(path.join(target, "tree", "hooks", "opencode", "superpowers.ts"), SRC)
     // "junction" works unprivileged on Windows and is a symlink on POSIX.
-    fs.symlinkSync(target, path.join(root, githubCacheId(SPECS.bare)), "junction")
+    const cacheEntry = cacheDirFor(root, SPECS.bare)
+    fs.mkdirSync(path.dirname(cacheEntry), { recursive: true })
+    fs.symlinkSync(target, cacheEntry, "junction")
     await assert.rejects(
       () => resolveGithubPlugin(SPECS.bare, { cacheRoot: root, fetchImpl: noNetwork(), trusted: false }),
       /symlink|outside the cache root/,
@@ -521,11 +777,12 @@ test("resolveGithubPlugin: cold cache + failing network fails closed (never fall
   }
 })
 
-test("resolveGithubPlugin: a response over the size cap is refused and never cached", async () => {
+test("resolveGithubPlugin: an oversized SINGLE-FILE response is refused and never cached", async () => {
   const root = tmpRoot()
   try {
+    // The snapshot is empty (falls back), and the raw body is over the 1 MiB cap.
     const big = "x".repeat(1024 * 1024 + 1)
-    const impl = fakeFetch({ contents: { "hooks/opencode/superpowers.ts": big } })
+    const impl = fakeFetch({ tree: {}, raw: { "hooks/opencode/superpowers.ts": big } })
     await assert.rejects(
       () => resolveGithubPlugin(SPECS.bare, { cacheRoot: root, fetchImpl: impl, trusted: true }),
       /larger than the 1048576-byte cap/,
@@ -536,23 +793,25 @@ test("resolveGithubPlugin: a response over the size cap is refused and never cac
   }
 })
 
-test("resolveGithubPlugin: oversized bodies are refused INCREMENTALLY (reading stops at the cap, mid-body)", async () => {
+test("resolveGithubPlugin: an oversized TARBALL is stopped mid-body, read incrementally, and degrades loudly", async () => {
   const root = tmpRoot()
   try {
-    // 10 chunks of 200,000 bytes = 2,000,000 total; the 1,048,576 cap trips
-    // exactly on the 6th chunk (5 chunks = 1,000,000 <= cap). The streaming
-    // body yields chunk by chunk, so the test OBSERVES incremental
-    // consumption: a buffering implementation never calls getReader at all,
-    // leaving the counter at 0, and fails this test.
-    const CHUNK = 200_000
-    const TOTAL_CHUNKS = 10
+    // 12 chunks of 400 bytes = 4,800 total; a 2048 cap trips on the 6th chunk.
+    // The content is incompressible so the gzipped tarball is large enough.
+    const CHUNK = 400
+    const TOTAL_CHUNKS = 12
+    // Incompressible content — a gzip of repeated text would be tiny and the
+    // 2048 cap would never trip.
+    const bigTree = { "hooks/opencode/superpowers.ts": randomBytes(4800).toString("latin1") }
     const consumed = { chunks: 0, cancelled: false }
-    const base = fakeFetch({ contents: { "hooks/opencode/superpowers.ts": "x".repeat(CHUNK * TOTAL_CHUNKS) } })
-    const encoder = new TextEncoder()
+    const base = fakeFetch({ tree: bigTree, raw: RAW })
+    const compressed = makeTarball(bigTree)
+    const calls = []
     const impl = async (url, init) => {
+      calls.push({ url, init })
       const response = await base(url, init)
-      if (!url.includes("raw.githubusercontent.com")) return response
-      const full = encoder.encode(await response.text())
+      if (!url.includes("codeload.github.com")) return response
+      const full = new Uint8Array(compressed)
       let index = 0
       return {
         ...response,
@@ -574,17 +833,17 @@ test("resolveGithubPlugin: oversized bodies are refused INCREMENTALLY (reading s
         },
       }
     }
-    await assert.rejects(
-      () => resolveGithubPlugin(SPECS.bare, { cacheRoot: root, fetchImpl: impl, trusted: true }),
-      (error) => {
-        assert.match(error.message, /exceeded the 1048576-byte cap after \d+ bytes/)
-        assert.match(error.message, /mid-body/)
-        return true
-      },
-    )
-    assert.equal(consumed.chunks, 6, "reading must stop exactly at the cap — the whole body was never consumed")
+    const result = await resolveGithubPlugin(SPECS.bare, {
+      cacheRoot: root,
+      fetchImpl: impl,
+      trusted: true,
+      limits: { tarballBytes: 2048 },
+    })
+    assert.equal(result.meta.layout, "single-file", "the over-cap tarball must degrade loudly")
+    assert.match(result.meta.snapshotFallback, /exceeded the 2048-byte download cap/)
+    assert.ok(consumed.chunks <= 6, "reading must stop at the cap — the whole body was never consumed")
     assert.equal(consumed.cancelled, true, "the reader must be cancelled on refusal")
-    assert.equal(fs.readdirSync(root).length, 0, "nothing may be cached")
+    assert.equal(fs.readFileSync(path.join(cacheDirFor(root, SPECS.bare), "plugin.ts"), "utf8"), SRC)
   } finally {
     fs.rmSync(root, { recursive: true, force: true })
   }
@@ -595,15 +854,15 @@ test("resolveGithubPlugin: cache writes are restrictive where the OS honours mod
   try {
     await resolveGithubPlugin(SPECS.bare, {
       cacheRoot: root,
-      fetchImpl: fakeFetch({ contents: { "hooks/opencode/superpowers.ts": SRC } }),
+      fetchImpl: fakeFetch({ tree: TREE }),
       trusted: true,
     })
-    const cacheDir = path.join(root, fs.readdirSync(root)[0])
-    assert.deepEqual(fs.readdirSync(cacheDir).sort(), ["meta.json", "plugin.ts"], "exactly the two artifacts — no temp leftover")
+    const cacheDir = cacheDirFor(root, SPECS.bare)
+    assert.deepEqual(fs.readdirSync(cacheDir).sort(), ["meta.json", "tree"], "exactly the two artifacts — no temp leftover")
     if (process.platform !== "win32") {
       // Windows ignores POSIX mode bits; where they are honoured, least privilege.
-      assert.equal(fs.statSync(path.join(cacheDir, "plugin.ts")).mode & 0o777, 0o600, "plugin file must be owner-only")
       assert.equal(fs.statSync(path.join(cacheDir, "meta.json")).mode & 0o777, 0o600, "provenance must be owner-only")
+      assert.equal(fs.statSync(path.join(cacheDir, "tree")).mode & 0o777, 0o700, "the tree must be owner-only")
       assert.equal(fs.statSync(cacheDir).mode & 0o777, 0o700, "the cache entry must be owner-only")
     }
   } finally {
@@ -611,28 +870,22 @@ test("resolveGithubPlugin: cache writes are restrictive where the OS honours mod
   }
 })
 
-test("resolveGithubPlugin: a failed cache write rolls back (no partial plugin file, no temp leftover)", async () => {
+test("resolveGithubPlugin: a failed cache write rolls back (no partial tree, no temp leftover)", async () => {
   const root = tmpRoot()
   try {
-    const cacheDir = path.join(root, githubCacheId(SPECS.bare))
-    fs.mkdirSync(cacheDir, { recursive: true })
-    // Plant an obstruction: meta.json exists as a DIRECTORY, so the meta
-    // write fails AFTER the plugin write succeeded. The rollback must remove
-    // the partial plugin file and every temp file; nothing may be executed
-    // from an incomplete cache.
-    fs.mkdirSync(path.join(cacheDir, "meta.json"))
-    const impl = fakeFetch({ contents: { "hooks/opencode/superpowers.ts": SRC } })
+    const cacheDir = cacheDirFor(root, SPECS.bare)
+    // Plant an obstruction: the tree exists as a plain directory with NO
+    // provenance record. The snapshot materializer must refuse it, and the
+    // rollback must leave no partial artifacts and no temp files behind.
+    fs.mkdirSync(path.join(cacheDir, "tree"), { recursive: true })
+    fs.writeFileSync(path.join(cacheDir, "tree", "planted.txt"), "not a snapshot")
+    const impl = fakeFetch({ tree: TREE })
     await assert.rejects(
       () => resolveGithubPlugin(SPECS.bare, { cacheRoot: root, fetchImpl: impl, trusted: true }),
       /could not write the github: cache/,
     )
-    assert.equal(fs.existsSync(path.join(cacheDir, "plugin.ts")), false, "no partial plugin file may survive")
-    assert.equal(fs.existsSync(path.join(cacheDir, "meta.json")), true, "the planted obstruction is not ours to delete")
-    assert.deepEqual(
-      fs.readdirSync(cacheDir).filter((name) => name !== "meta.json"),
-      [],
-      "no temp file may be left behind",
-    )
+    const leftovers = fs.readdirSync(cacheDir)
+    assert.deepEqual(leftovers, [], "no partial tree, no temp file may survive the rollback")
   } finally {
     fs.rmSync(root, { recursive: true, force: true })
   }
@@ -641,7 +894,9 @@ test("resolveGithubPlugin: a failed cache write rolls back (no partial plugin fi
 test("resolveGithubPlugin: a redirect response is refused (redirects must not leave the origin)", async () => {
   const root = tmpRoot()
   try {
-    const impl = fakeFetch({ contents: { "hooks/opencode/superpowers.ts": SRC }, rawStatus: 302 })
+    // The snapshot is empty (so the raw surface is reached), and the raw body
+    // is a 302: the refusal must name the redirect and stay fail-closed.
+    const impl = fakeFetch({ tree: {}, raw: {}, rawStatus: 302 })
     await assert.rejects(
       () => resolveGithubPlugin(SPECS.bare, { cacheRoot: root, fetchImpl: impl, trusted: true }),
       (error) => {
@@ -657,18 +912,25 @@ test("resolveGithubPlugin: a redirect response is refused (redirects must not le
   }
 })
 
-test("resolveGithubPlugin: a response URL that left the allowed origin is refused", async () => {
+test("resolveGithubPlugin: a TARBALL response that left the allowed origin is refused hard (no fallback)", async () => {
   const root = tmpRoot()
   try {
-    const base = fakeFetch({ contents: { "hooks/opencode/superpowers.ts": SRC } })
+    const base = fakeFetch({ tree: TREE, raw: RAW })
+    const calls = []
     const impl = async (url, init) => {
+      calls.push({ url, init })
       const response = await base(url, init)
-      if (url.includes("raw.githubusercontent.com")) return { ...response, url: "https://evil.example/payload.ts" }
+      if (url.includes("codeload.github.com")) return { ...response, url: "https://evil.example/tarball.gz" }
       return response
     }
     await assert.rejects(
       () => resolveGithubPlugin(SPECS.bare, { cacheRoot: root, fetchImpl: impl, trusted: true }),
       /left the allowed origin.*evil\.example/,
+    )
+    assert.equal(
+      calls.some((call) => call.url.startsWith("https://raw.githubusercontent.com/")),
+      false,
+      "an origin-leaving tarball must not degrade to single-file",
     )
     assert.equal(fs.readdirSync(root).length, 0)
   } finally {
@@ -692,7 +954,7 @@ test("control characters never reach a refusal message raw (spec and remote resp
 
   const root = tmpRoot()
   try {
-    const impl = fakeFetch({ defaultBranch: "main\u0000evil", contents: { "hooks/opencode/superpowers.ts": SRC } })
+    const impl = fakeFetch({ defaultBranch: "main\u0000evil", tree: TREE })
     try {
       await resolveGithubPlugin(SPECS.bare, { cacheRoot: root, fetchImpl: impl, trusted: true })
     } catch (error) {
@@ -708,7 +970,7 @@ test("control characters never reach a refusal message raw (spec and remote resp
 test("resolveGithubPlugin: an unusable commit sha from the API refuses (identity must be a real commit)", async () => {
   const root = tmpRoot()
   try {
-    const impl = fakeFetch({ contents: { "hooks/opencode/superpowers.ts": SRC }, commitSha: "not-a-sha" })
+    const impl = fakeFetch({ tree: TREE, commitSha: "not-a-sha" })
     await assert.rejects(
       () => resolveGithubPlugin(SPECS.bare, { cacheRoot: root, fetchImpl: impl, trusted: true }),
       /no usable commit sha/,
@@ -724,7 +986,7 @@ test("resolveGithubPlugin: an unusable commit sha from the API refuses (identity
 test("resolveGithubPlugin: no candidate path existing refuses with every path tried", async () => {
   const root = tmpRoot()
   try {
-    const impl = fakeFetch({ contents: {} })
+    const impl = fakeFetch({ tree: {}, raw: {} })
     await assert.rejects(() => resolveGithubPlugin(SPECS.bare, { cacheRoot: root, fetchImpl: impl, trusted: true }), (error) => {
       assert.match(error.message, /no plugin file found for obra\/superpowers at ref main/)
       for (const candidate of ["hooks/opencode/superpowers.ts", "hooks/opencode/index.ts", "plugin.ts", "index.ts"]) {
@@ -744,7 +1006,7 @@ test("resolveGithubPlugin: an explicit path that misses refuses naming that path
   const root = tmpRoot()
   try {
     await assert.rejects(
-      () => resolveGithubPlugin(SPECS.full, { cacheRoot: root, fetchImpl: fakeFetch({ contents: {} }), trusted: true }),
+      () => resolveGithubPlugin(SPECS.full, { cacheRoot: root, fetchImpl: fakeFetch({ tree: {}, raw: {} }), trusted: true }),
       /plugin file "hooks\/opencode\/rtk\.ts" not found in rtk-ai\/rtk at ref v0\.50\.0: hooks\/opencode\/rtk\.ts \(HTTP 404\)/,
     )
   } finally {
@@ -766,14 +1028,53 @@ test("resolveGithubPlugin: a failing default-branch lookup refuses loudly with t
 
 /* ---- the informed mount report ---- */
 
-test("mountNote: always prints the resolved commit, the digest, and the host-rights line", () => {
-  const meta = expectedMeta({})
-  const fetched = mountNote(meta, true)
+test("mountNote: a snapshot always prints the layout, the commit, the digest, and the host-rights line", () => {
+  const snapshot = {
+    source: "github",
+    owner: "obra",
+    repo: "superpowers",
+    ref: "main",
+    resolvedCommit: COMMIT,
+    path: "hooks/opencode/superpowers.ts",
+    sha256: sha256Hex(SRC),
+    bytes: Buffer.byteLength(SRC, "utf8"),
+    fetchedAt: new Date(0).toISOString(),
+    layout: "snapshot",
+    tarballSha256: "d".repeat(64),
+    tarballBytes: 1234,
+    files: 7,
+    treeBytes: 9999,
+  }
+  const fetched = mountNote(snapshot, true)
   assert.match(fetched, new RegExp(`commit ${COMMIT}`))
-  assert.match(fetched, new RegExp(`sha256 ${meta.sha256.slice(0, 12)}`))
+  assert.match(fetched, /as a repository snapshot \(7 files, 9999 bytes materialized/)
+  assert.match(fetched, new RegExp(`sha256 ${sha256Hex(SRC).slice(0, 12)}`))
+  assert.match(fetched, /tarball sha256 d{12}…/)
   assert.match(fetched, /executes with the host process's full user rights/)
-  const warm = mountNote(meta, false)
+  const warm = mountNote(snapshot, false)
   assert.match(warm, new RegExp(`commit ${COMMIT}`))
-  assert.match(warm, /sha256 [0-9a-f]{12}… verified/)
-  assert.match(warm, /executes with the host process's full user rights/)
+  assert.match(warm, /repository snapshot 7 files/)
+  assert.match(warm, /verified/)
+})
+
+test("mountNote: a single-file fallback says the loss out loud on every load", () => {
+  const single = {
+    source: "github",
+    owner: "obra",
+    repo: "superpowers",
+    ref: "main",
+    resolvedCommit: COMMIT,
+    path: "hooks/opencode/superpowers.ts",
+    sha256: sha256Hex(SRC),
+    bytes: Buffer.byteLength(SRC, "utf8"),
+    fetchedAt: new Date(0).toISOString(),
+    layout: "single-file",
+    snapshotFallback: "the tarball of obra/superpowers at commit … exceeded the 16 MiB download cap",
+  }
+  const fetched = mountNote(single, true)
+  assert.match(fetched, /as a SINGLE FILE — the repository snapshot was not used/)
+  assert.match(fetched, /sibling files are NOT available, and a plugin that reads them by relative path is inert/)
+  assert.match(fetched, new RegExp(`exceeded the 16 MiB download cap`))
+  const warm = mountNote(single, false)
+  assert.match(warm, /SINGLE FILE — sibling files are NOT available and a plugin that reads them by relative path is inert/)
 })

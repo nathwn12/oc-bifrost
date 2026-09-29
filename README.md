@@ -5,7 +5,7 @@
 **Run V1-era OpenCode plugin hooks on the OpenCode V2 runtime.**
 *V2 hard-rejects them at load; this small plugin loads them anyway.*
 
-[![npm](https://img.shields.io/npm/v/@nathwn12/oc-bifrost?label=npm&color=205EA6)](https://www.npmjs.com/package/@nathwn12/oc-bifrost) [![check](https://github.com/nathwn12/oc-bifrost/actions/workflows/ci.yml/badge.svg)](https://github.com/nathwn12/oc-bifrost/actions/workflows/ci.yml) [![license: MIT](https://img.shields.io/badge/license-MIT-66800B.svg)](LICENSE)
+[![npm](https://img.shields.io/npm/v/@nathwn12/oc-bifrost?label=npm&color=205EA6)](https://www.npmjs.com/package/@nathwn12/oc-bifrost) [![check](https://github.com/nathwn12/oc-bifrost/actions/workflows/ci.yml/badge.svg)](https://github.com/nathwn12/oc-bifrost/actions/workflows/ci.yml) [![license: MIT](https://img.shields.io/badge/license-MIT-66800B.svg)](LICENSE) [![downloads](https://img.shields.io/npm/dm/@nathwn12/oc-bifrost)](https://www.npmjs.com/package/@nathwn12/oc-bifrost)
 
 </div>
 

@@ -16,6 +16,17 @@ function asHandler(value: unknown): Handler | undefined {
 }
 
 /**
+ * The V1-era tool name for the bridged hook input. V2 registers the shell tool
+ * as `shell` (`packages/core/src/tool/plugin/shell.ts:22`); V1 plugins gate on
+ * `"bash"`. Presenting the V1 name is regression-safe: the vendored rtk
+ * accepts both spellings (`vendor/rtk.ts:20-21`), and any other V2 tool name
+ * passes through unchanged.
+ */
+function v1ToolName(tool: unknown): unknown {
+  return tool === "shell" ? "bash" : tool
+}
+
+/**
  * V2 event payload -> V1 `{ type, properties }` envelope, for the one event
  * both eras name: session idle.
  *
@@ -57,7 +68,7 @@ export async function registerV1Hooks(
   const before = asHandler(table["tool.execute.before"])
   if (before) {
     await ctx.tool.hook("execute.before", async (event) => {
-      const input = { tool: event.tool, sessionID: event.sessionID, callID: String(event.id) }
+      const input = { tool: v1ToolName(event.tool), sessionID: event.sessionID, callID: String(event.id) }
       const output = { args: event.input }
       await before(input, output)
       if (output.args !== event.input) event.input = output.args
@@ -70,7 +81,7 @@ export async function registerV1Hooks(
   if (after) {
     await ctx.tool.hook("execute.after", async (event) => {
       const input = {
-        tool: event.tool,
+        tool: v1ToolName(event.tool),
         sessionID: event.sessionID,
         callID: String(event.id),
         args: event.input,

@@ -68,13 +68,17 @@ async function assertRefused(hook) {
 }
 
 test("bridge: tool.execute.before mutates the executed input", async () => {
-  // Mirrors RTK's real plugin: rewrite the command in place.
+  // Mirrors RTK's real plugin (`vendor/rtk.ts:20-21`): both-arms gate on the
+  // tool name, then rewrite the command in place. The V1 hook sees `bash`
+  // (the V1-era name) for a V2 `shell` execution, so the real vendor gate
+  // matches.
   const { ctx, fire } = fakeContext()
   await registerV1Hooks(
     ctx,
     {
       "tool.execute.before": async (input, output) => {
-        if (!String(input.tool).includes("shell")) return
+        const tool = String(input?.tool ?? "").toLowerCase()
+        if (tool !== "bash" && tool !== "shell") return
         output.args.command = `rtk ${output.args.command}`
       },
     },
@@ -83,6 +87,26 @@ test("bridge: tool.execute.before mutates the executed input", async () => {
 
   const event = { tool: "shell", sessionID: "s", agent: "a", messageID: "m", id: "c", input: { command: "git status" } }
   await fire("tool:execute.before", event)
+  assert.equal(event.input.command, "rtk git status")
+})
+
+test("bridge: a V2 shell execution presents input.tool as the V1 bash name and the write-back still flows", async () => {
+  const { ctx, fire } = fakeContext()
+  const seen = []
+  await registerV1Hooks(
+    ctx,
+    {
+      "tool.execute.before": async (input, output) => {
+        seen.push(input.tool)
+        output.args.command = `rtk ${output.args.command}`
+      },
+    },
+    createReporter("alias", {}),
+  )
+
+  const event = { tool: "shell", sessionID: "s", agent: "a", messageID: "m", id: "c", input: { command: "git status" } }
+  await fire("tool:execute.before", event)
+  assert.deepEqual(seen, ["bash"])
   assert.equal(event.input.command, "rtk git status")
 })
 

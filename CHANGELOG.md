@@ -1,6 +1,6 @@
 # Changelog
 
-## 1.4.0 (2026-09-29)
+## 1.3.1 (2026-09-29)
 
 ### Changed
 
@@ -22,7 +22,7 @@
   other event names and payloads pass through unchanged.
 - **The docs record the dogfood run and the compat merge.** Flight 2 sampled ten plugins
   against the packed artifact and its verdicts are recorded (PROOF.md Proof 11,
-  VERIFIED-PLUGINS.md), and README.md / SKILL.md pin 1.4.0 with the matrix agreeing with
+  VERIFIED-PLUGINS.md), and README.md / SKILL.md pin 1.3.1 with the matrix agreeing with
   `src/compat-matrix.ts`.
 
 ### Checks

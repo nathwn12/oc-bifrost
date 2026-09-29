@@ -110,6 +110,13 @@ export interface OCContext {
   }
   readonly session: {
     hook(name: string, cb: (event: Record<string, unknown>) => unknown): Promise<unknown>
+    /**
+     * V2 `session.context`: projected messages since the last completed
+     * compaction. This is the only message read V2 exposes to a server-side
+     * plugin (packages/plugin/src/promise/session.ts:153-170); the HTTP
+     * `session.messages` route is not reachable from the plugin context.
+     */
+    context?(input: { sessionID: string }): Promise<unknown>
   }
   readonly permission: {
     hook(name: "evaluate", cb: (event: Record<string, unknown>) => unknown): Promise<unknown>

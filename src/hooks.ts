@@ -15,6 +15,32 @@ function asHandler(value: unknown): Handler | undefined {
   return typeof value === "function" ? (value as Handler) : undefined
 }
 
+/**
+ * V2 event payload -> V1 `{ type, properties }` envelope, for the one event
+ * both eras name: session idle.
+ *
+ * V2 replaced `session.idle` with `session.status` carrying
+ * `{ sessionID, status: { type: "idle" | "busy" | "retry" } }`
+ * (`packages/schema/src/session-status-event.ts:35-51`), and V2 payloads carry
+ * `data`, not V1's `properties`. Without the synthesis a V1 hook that checks
+ * `event.type === "session.idle"` never matches. The deprecated `session.idle`
+ * event is still emitted by V2 and only needs its `properties` alias.
+ *
+ * Nothing else is translated: the two eras' names and payloads differ
+ * elsewhere, and inventing more would be a lie.
+ */
+function toV1Event(event: Record<string, unknown>): Record<string, unknown> {
+  const data = (event.data ?? {}) as Record<string, unknown>
+  const status = data.status as { type?: unknown } | undefined
+  if (event.type === "session.status" && status?.type === "idle") {
+    return { ...event, type: "session.idle", properties: { sessionID: data.sessionID } }
+  }
+  if (event.type === "session.idle") {
+    return { ...event, properties: { sessionID: data.sessionID } }
+  }
+  return event
+}
+
 export interface RegisterResult {
   cleanups: Array<() => void | Promise<void>>
 }
@@ -285,13 +311,17 @@ export async function registerV1Hooks(
     void (async () => {
       for await (const event of ctx.event.subscribe({ signal: controller.signal })) {
         try {
-          await eventHook({ event })
+          await eventHook({ event: toV1Event(event) })
         } catch (error) {
           reporter.warn(`event hook threw: ${(error as Error).message}`)
         }
       }
     })()
-    reporter.record("event", "partial", "V2 event names/payloads differ from V1")
+    reporter.record(
+      "event",
+      "partial",
+      "V2 session.status[idle] synthesised to the V1 session.idle envelope; other names/payloads pass through",
+    )
   }
 
   /* ---------------- dispose ---------------- */

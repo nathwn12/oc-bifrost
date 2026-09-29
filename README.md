@@ -37,6 +37,15 @@ The bridge is **one entry** in the `plugins` array of your `opencode.jsonc`; Ope
 
 Restart OpenCode. **That's the whole setup** — the mount report names what bridged and what was refused. Proof: [`PROOF.md`](PROOF.md), [`VERIFIED-PLUGINS.md`](VERIFIED-PLUGINS.md); agent-driven setup: [`INSTALL.md`](INSTALL.md).
 
+### 🧭 What actually mounts — two paths
+
+A module named in `options.plugins` is routed by its **shape**, and only the V1 shape is hook-translated:
+
+- **V1 hook module** — a factory (a `default` async export, `{ server: factory }`, or a `*Plugin` named export). Its hooks are translated one by one against the [compatibility matrix](#-compatibility-matrix) below.
+- **V2-shaped definition** — an `export default` carrying `{ id, setup | effect }`. It mounts **as-is** with the host context, exactly as the host itself would have mounted it. A **dual-export** file that ships both a V1 named export *and* a V2 default (for example `obra/superpowers@v6.4.2`) takes this path: the V2 default is used and the V1 named export is left untouched — no hook translation is applied to it.
+
+Sourcing is `github:` / a local path / a bundled `preset:` only. **npm and bare package names are refused** (`src/index.ts`); point at an installed copy by absolute path instead. And a plugin that needs one of the seven refused V1 hooks still needs a real port — the bridge will not fake it.
+
 Name each legacy plugin with **exactly one** of three specifiers:
 
 - **`github:<owner>/<repo>[@<ref>][#<path>]`** — fetch from GitHub source. **The advertised, default route.** No `@<ref>` → the default branch, resolved once at first fetch; no `#<path>` → `hooks/opencode/<repo>.ts`, `hooks/opencode/index.ts`, `plugin.ts`, `index.ts` are probed in order, and a miss lists every path it tried.
@@ -81,6 +90,18 @@ brew install rtk                 # macOS / Linux
 ```
 
 > ⚠️ **Do not run `rtk init -g --opencode`.** It writes `rtk.ts` into `~/.config/opencode/plugins/`, a discovery directory where V2 hard-rejects V1 modules. `preset:rtk` exists precisely so you never touch that path.
+
+---
+
+## 🧾 The mount report — and where to read it when stdout is gone
+
+The per-plugin mount report is the proof surface: it names every hook that bridged (`full`), approximated (`partial`), or was refused (`unsupported`), plus each `github:` resolved commit and digest. It prints to the console (`verbose: true`, the default).
+
+The host **discards stdout** when it runs as a **managed background service** or a **stdio server** — exactly the modes where nobody is watching a terminal — so the same lines are mirrored to a file:
+
+- **Default:** `~/.cache/opencode/oc-bifrost/report.log` (or `$XDG_CACHE_HOME/opencode/oc-bifrost/report.log` when `XDG_CACHE_HOME` is set) — the same shared user cache `github:` artifacts live under.
+- **Override:** `OC_BIFROST_REPORT=<path>` writes somewhere else; `OC_BIFROST_REPORT=off` disables the file.
+- **Policy:** **append** across loads (a crashed or exited run is still readable), hard-capped at **256 KiB** — a write that would cross the cap rolls the file over so the newest report survives whole. Control characters are escaped before they reach disk; console behaviour is unchanged.
 
 ---
 
@@ -143,6 +164,8 @@ This bridges **the mappable subset**, not "any plugin, seamlessly." Seven of the
 | `freshness` | `"off" \| "online"` | `"off"` | Check the bundled pin against upstream's latest release after mounting |
 
 `freshness: "online"` (or `OC_BIFROST_FRESHNESS=online`) is off by default, never downloads or executes plugin code, fires off the load path, and reports `unknown` — not an error — when offline or rate-limited.
+
+The durable report file (see above) is controlled by the `OC_BIFROST_REPORT` environment variable, not an option: it defaults to the shared OpenCode cache and can be redirected to a path or disabled with `off`.
 
 ---
 

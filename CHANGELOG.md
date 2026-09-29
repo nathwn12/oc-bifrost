@@ -1,5 +1,32 @@
 # Changelog
 
+## Unreleased
+
+### Added
+
+- **Durable mount report — the proof surface now survives discarded stdout.** Every line the
+  reporter emits is mirrored to a file, because the console is structurally unreachable where the
+  report matters most: the V2 host spawns the background service with stdout ignored
+  (`packages/client/src/service-contender.ts`), stdio mode uses stdout as the JSON-RPC channel, and
+  the plugin loader does not wrap console (`packages/core/src/plugin/module.ts`).
+  - **Default path:** `~/.cache/opencode/oc-bifrost/report.log`
+    (`$XDG_CACHE_HOME/opencode/oc-bifrost/report.log` when set) — the same shared user cache the
+    `github:` artifacts live under.
+  - **Override / disable:** `OC_BIFROST_REPORT=<path>`, or `OC_BIFROST_REPORT=off`.
+  - **Policy:** append across loads; hard-capped at 256 KiB, where a write that would cross the cap
+    rolls the file over so the newest report survives whole. Control characters are escaped before
+    they reach disk. Console behaviour is unchanged, and a sink failure is warned about once and
+    never breaks a mount.
+
+### Changed
+
+- **The README and `VERIFIED-PLUGINS.md` now document both mounting routes.** V1 hook modules get
+  hook translation; a V2-shaped `export default { id, setup | effect }` mounts as-is, and a
+  dual-export file (a V1 named export plus a V2 default, e.g. `obra/superpowers@v6.4.2`) takes the
+  V2 pass-through route with its V1 named export left untouched. Both docs also restate that
+  `github:` / local / `preset:` are the only accepted sources (npm specifiers are refused) and that
+  the seven refused V1 hooks still need a real port.
+
 ## 1.0.1
 
 ### Fixed

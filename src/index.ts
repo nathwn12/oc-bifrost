@@ -15,6 +15,7 @@ import path from "node:path"
 import { pathToFileURL } from "node:url"
 import { Plugin } from "@opencode/plugin"
 import { createReporter, renderReport } from "./report.js"
+import { createReportSink } from "./sink.js"
 import { discover } from "./discover.js"
 import { buildV1Context } from "./context.js"
 import { registerV1Hooks } from "./hooks.js"
@@ -149,12 +150,21 @@ export default Plugin.define({
     const cleanups: Array<() => void | Promise<void>> = []
     const directory = context.location?.directory ?? process.cwd()
 
+    // Durable mirror of the report. stdout is discarded when the host runs as a
+    // managed background service or a stdio server, so console output alone is
+    // unreachable exactly where the proof matters. Console behaviour is kept.
+    const sink = createReportSink({ env: process.env })
+
     // Proactive, before any mount: a stranded V1 file in a discovery directory
     // is rejected by the host before this bridge ever runs. Warn while the
     // user can still move it.
     const stranded = scanStrandedV1({ directory })
     if (stranded.length > 0) {
-      const scanReporter = createReporter("scan", { strict: options.strict, verbose: options.verbose })
+      const scanReporter = createReporter("scan", {
+        strict: options.strict,
+        verbose: options.verbose,
+        sink: sink.write,
+      })
       const MAX = 5
       for (const file of stranded.slice(0, MAX)) scanReporter.warn(strandedWarning(file))
       if (stranded.length > MAX) {
@@ -163,12 +173,18 @@ export default Plugin.define({
     }
 
     if (entries.length === 0) {
-      console.warn("[oc-bifrost] no plugins configured; set options.plugins to bridge legacy plugins")
+      const notice = "[oc-bifrost] no plugins configured; set options.plugins to bridge legacy plugins"
+      console.warn(notice)
+      sink.write(notice)
       return
     }
 
     for (const entry of entries) {
-      const reporter = createReporter(entry.spec, { strict: options.strict, verbose: options.verbose })
+      const reporter = createReporter(entry.spec, {
+        strict: options.strict,
+        verbose: options.verbose,
+        sink: sink.write,
+      })
 
       let resolved: ResolvedSpec
       try {
@@ -287,7 +303,9 @@ export default Plugin.define({
       }
 
       if (options.verbose !== false) {
-        console.log(`[oc-bifrost] ${entry.spec}\n${renderReport(reporter)}`)
+        const block = `[oc-bifrost] ${entry.spec}\n${renderReport(reporter)}`
+        console.log(block)
+        sink.write(block)
       }
     }
 

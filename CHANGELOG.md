@@ -1,5 +1,30 @@
 # Changelog
 
+## Unreleased
+
+### Changed
+
+- **V1 factory discovery now recognises by shape, not just by name** (`src/discover.ts`). Any
+  named function export is a V1 factory candidate; the legacy `/Plugin$/` name heuristic survives
+  only as a preference for modules whose first function export is a helper. Plugins whose factory
+  carries no `Plugin` suffix (SystemPromptLogger, DirenvLoader) now mount instead of being
+  refused as unknown modules.
+- **Bridged tool-hook input presents the V1-era tool name.** V2 registers its shell tool as
+  `shell` (`packages/core/src/tool/plugin/shell.ts:22`), while V1-era plugins gate on
+  `"bash"`; `src/hooks.ts` now presents `bash` for `shell` in bridged hook input, and every other
+  tool name passes through unchanged.
+- **`session.idle` is synthesised from the terminal execution events, not `session.status[idle]`.**
+  V2 `session.execution.succeeded|failed|interrupted` - the durable events the host emits when a
+  session run ends (`packages/schema/src/session-event.ts:246-257`, exactly what the client's own
+  idle derivation reads at `packages/client/src/solid/data.ts:1025-1028`) - are translated to the
+  V1 `session.idle` envelope. `session.status` never reaches the plugin feed on 2.0.18, so the
+  earlier synthesis is gone rather than kept as a dead path. All other event names and payloads
+  pass through unchanged.
+
+### Checks
+
+- `npm run check` green (196/196).
+
 ## 1.3.0 (2026-09-29)
 
 ### Added

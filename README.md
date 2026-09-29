@@ -25,7 +25,7 @@ The bridge is **one entry** in the `plugins` array of your `opencode.jsonc`; Ope
 {
   "plugins": [
     {
-      "package": "@nathwn12/oc-bifrost@1.0.1",
+      "package": "@nathwn12/oc-bifrost@1.3.0",
       "options": {
         "trustRemote": true, // consent: the first `github:` fetch downloads and executes a remote plugin
         "plugins": ["github:obra/superpowers"]
@@ -56,7 +56,7 @@ Name each legacy plugin with **exactly one** of three specifiers:
 
 ### 📌 Version choice & updates
 
-- **Pin the exact version** — `"package": "@nathwn12/oc-bifrost@1.0.1"`. Predictable, and the version these docs describe.
+- **Pin the exact version** — `"package": "@nathwn12/oc-bifrost@1.3.0"`. Predictable, and the version these docs describe.
 - `@^1.0.0` auto-tracks 1.x and never adopts a new major silently.
 - A bare `@nathwn12/oc-bifrost` or `@latest` may be unstable while OpenCode's plugin cache settles.
 - **If an update does not appear:** run `opencode plugin check`; if it still does not, delete `~/.cache/opencode/npm/@nathwn12/oc-bifrost@latest` and reload.
@@ -79,7 +79,7 @@ Mounting a `github:` plugin downloads the repository snapshot at the resolved co
 **Optional; not the advertised route.** When GitHub is unreachable — an offline or air-gapped host — `preset:rtk` mounts a **bundled** V1 plugin (`vendor/rtk.ts`, verbatim `rtk-ai/rtk` `v0.50.0`, Apache-2.0) with **zero network**. It is opt-in, so nothing from RTK runs unless you ask for it.
 
 ```jsonc
-{ "package": "@nathwn12/oc-bifrost@1.0.1", "options": { "plugins": ["preset:rtk"] } }
+{ "package": "@nathwn12/oc-bifrost@1.3.0", "options": { "plugins": ["preset:rtk"] } }
 ```
 
 **Prerequisite:** the `rtk` binary (`>= 0.23.0`) on `PATH`; `preset:rtk` probes before mounting and names this command if it is missing. No winget? Take the release asset from [`rtk-ai/rtk`](https://github.com/rtk-ai/rtk/releases) instead. Not from crates.io — `cargo install rtk` installs a different project.

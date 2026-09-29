@@ -133,7 +133,7 @@ The unit of compatibility is the **V1 hook**, not the plugin — once a hook is 
 | `tool` | 🟡 partial | `ctx.tool.transform` editor.add |
 | `event` | 🟡 partial | `ctx.event.subscribe()` — V2 event names differ |
 | `experimental.chat.system.transform` | 🟡 partial | `ctx.session.hook("context")` |
-| `experimental.chat.messages.transform` | 🟡 partial | `ctx.session.hook("context")` |
+| `experimental.chat.messages.transform` | 🟢 full | `ctx.session.hook("context")` — V1 `{info,parts}` envelope pre-fill + write-back |
 | `experimental.session.compacting` | 🟡 partial | `ctx.session.hook("compaction")` |
 | `config` | 🔴 refused | per-domain transforms with different semantics |
 | `auth` | 🔴 refused | `ctx.integration.transform` + integration APIs |

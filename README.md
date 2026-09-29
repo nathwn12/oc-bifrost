@@ -48,7 +48,7 @@ Sourcing is `github:` / a local path / a bundled `preset:` only. **npm and bare 
 
 Name each legacy plugin with **exactly one** of three specifiers:
 
-- **`github:<owner>/<repo>[@<ref>][#<path>]`** — fetch from GitHub source. **The advertised, default route.** No `@<ref>` → the default branch, resolved once at first fetch; no `#<path>` → `hooks/opencode/<repo>.ts`, `hooks/opencode/index.ts`, `plugin.ts`, `index.ts` are probed in order, and a miss lists every path it tried.
+- **`github:<owner>/<repo>[@<ref>][#<path>]`** — **The advertised, default route — snapshot-first.** The ref resolves to a commit once, at first fetch (the default branch when no `@<ref>`), then the **repository tarball** is fetched from codeload **at that resolved commit** and materialized as a whole tree — sibling files exist beside the plugin entry, so `obra/superpowers` reads its own `skills/`. **Caps:** 16 MiB compressed · 64 MiB uncompressed · 5000 files. **Hostile archives are refused outright, never materialized** — path-traversal, absolute/`..` escapes, NUL/backslash names, duplicate paths; a link or device entry refuses the snapshot too. The old single-file fetch is the **loud fallback** for an over-cap, malformed, or candidate-less snapshot: the mount note names the loss — `sibling files are NOT available`, and a plugin that reads them by relative path is inert. Never a silent downgrade. No `#<path>` → `hooks/opencode/<repo>.ts`, `hooks/opencode/index.ts`, `plugin.ts`, `index.ts` are probed in order inside the tree, and a miss lists every path it tried.
 - **A local path** — resolves against the session directory; park it in `legacy/`, never a discovery directory.
 - **A bundled, zero-fetch fallback** — for offline / air-gapped hosts; documented in the fallback section below.
 
@@ -65,12 +65,12 @@ Name each legacy plugin with **exactly one** of three specifiers:
 
 ## 🔐 Trust model
 
-Mounting a `github:` plugin executes a remote file **in the host process, with your rights**. The sha256 recorded on first use pins those exact bytes — it does not vouch for them.
+Mounting a `github:` plugin downloads the repository snapshot at the resolved commit and executes its entry file **in the host process, with your rights**. The sha256 recorded on first use pins those exact bytes — the tarball and the entry file alike — it does not vouch for them.
 
 - **Cold cache refuses by default** — nothing is fetched or executed until you opt in, per bridge entry: `"trustRemote": true`, or `OC_BIFROST_TRUST=github` (an explicit `false` wins over the env var).
 - **Warm, hash-verified cache** loads on its own: no re-consent, no network. A hash mismatch refuses loudly instead of running unverified bytes.
 - **The mount report keeps consent informed** — one line naming the resolved commit, the `sha256` digest, the byte count, and that it executes with the host process's full user rights.
-- **Offline or air-gapped** — the cold-cache fetch is fail-closed; pre-warm on a networked machine and copy the shared `oc-bifrost/github/` cache across. It lives under `$XDG_CACHE_HOME/opencode/` or, by default, `~/.cache/opencode/`.
+- **Offline or air-gapped** — the cold-cache fetch is fail-closed; pre-warm on a networked machine and copy the shared `oc-bifrost/github/v2/` cache across. It lives under `$XDG_CACHE_HOME/opencode/` or, by default, `~/.cache/opencode/`; snapshot trees materialize at `…/oc-bifrost/github/v2/<id>/tree/`. A flat pre-snapshot cache at `…/oc-bifrost/github/<id>/` is ignored with a warning (it cannot provide sibling files) and re-fetched with the same one-time consent.
 
 ---
 

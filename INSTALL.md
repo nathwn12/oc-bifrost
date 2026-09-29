@@ -21,7 +21,7 @@ package itself — there is no separate `npm i` step:
 {
   "plugins": [
     {
-      "package": "@nathwn12/oc-bifrost@1.1.0",
+      "package": "@nathwn12/oc-bifrost@1.2.0",
       "options": {
         "plugins": ["<exactly one specifier — one of the three paths below>"],
         "strict": false,
@@ -34,7 +34,7 @@ package itself — there is no separate `npm i` step:
 
 ### 1a. Choose the version form — then verify what resolved
 
-**Pin an exact version:** `"@nathwn12/oc-bifrost@1.1.0"` — the default and the version this page
+**Pin an exact version:** `"@nathwn12/oc-bifrost@1.2.0"` — the default and the version this page
 describes. `@^1.0.0` tracks 1.x and never adopts a new major silently. A bare `@nathwn12/oc-bifrost` or
 `@latest` may be unstable while OpenCode's plugin cache settles. State the form you used in your report.
 
@@ -63,30 +63,47 @@ them out loud.
 
 `github:<owner>/<repo>[@<ref>][#<path>]` — e.g. `github:obra/superpowers`.
 
-- No `@<ref>` → the repository's default branch (resolved once, at first fetch).
-- No `#<path>` → `hooks/opencode/<repo>.ts`, `hooks/opencode/index.ts`, `plugin.ts`, and `index.ts`
-  are probed in order. Pass `#<path>` when the plugin lives elsewhere; a failed probe lists every
-  path it tried.
-- First load fetches once into the shared user cache at
-  `$XDG_CACHE_HOME/opencode/oc-bifrost/github/<id>/` (default:
-  `~/.cache/opencode/oc-bifrost/github/<id>/`) and records the sha256 — trust on first use.
-  Later loads from any project verify the cached bytes against that record with zero network;
-  a mismatch refuses loudly.
+**Snapshot-first.** The ref resolves to a commit once, at first fetch (the repository's
+default branch when no `@<ref>`), then the **repository tarball** is downloaded from
+codeload **at that resolved commit** and materialized as a whole tree — sibling files
+exist beside the entry file, so `github:obra/superpowers` reads its own `skills/`.
 
-**Consent gate — the first fetch is an explicit, informed opt-in.** The first fetch downloads a
-plugin file from GitHub and executes it with the host process's full user rights. Mounting by source
-is trusting the publisher; the recorded sha256 pins those bytes afterwards, it does not vouch for
-them. A cold cache refuses by default, before anything is fetched or executed, and names exactly
-what would be downloaded and both opt-ins:
+- **Caps:** 16 MiB compressed · 64 MiB uncompressed · 5000 files. A breach never
+  truncates — it degrades (below) loudly.
+- **Hostile archives are refused outright, never materialized:** path-traversal,
+  absolute/`..` escapes, NUL/backslash names, duplicate paths. A link or device entry
+  refuses the snapshot too. Nothing hostile is cached and nothing is executed.
+- **Loud single-file fallback.** An over-cap, malformed, or candidate-less snapshot
+  mounts via the old one-file fetch — the mount note says loudly that sibling files are
+  **NOT** available and a plugin that reads them by relative path is inert. The
+  downgrade is never silent.
+- No `#<path>` → `hooks/opencode/<repo>.ts`, `hooks/opencode/index.ts`, `plugin.ts`, and
+  `index.ts` are probed in order inside the materialized tree. Pass `#<path>` when the
+  plugin lives elsewhere; a failed probe lists every path it tried.
+- First load fetches once into the shared user cache at
+  `$XDG_CACHE_HOME/opencode/oc-bifrost/github/v2/<id>/` (default:
+  `~/.cache/opencode/oc-bifrost/github/v2/<id>/`; the tree sits at `…/v2/<id>/tree/`)
+  and records the sha256 of the tarball **and** the entry file — trust on first use.
+  Later loads from any project verify the cached bytes against that record with zero
+  network; a mismatch refuses loudly. A flat pre-snapshot cache at `…/github/<id>/` is
+  ignored with a warning (it cannot provide sibling files) and re-fetched with the same
+  one-time consent.
+
+**Consent gate — the first fetch is an explicit, informed opt-in.** The first fetch
+downloads a repository snapshot from GitHub and executes its entry file with the host
+process's full user rights. Mounting by source is trusting the publisher; the recorded
+sha256 pins those bytes afterwards, it does not vouch for them. A cold cache refuses by
+default, before anything is fetched or executed, and names exactly what would be
+downloaded and both opt-ins:
 
 ```text
-[oc-bifrost] refusing to fetch "github:obra/superpowers" (cold cache, first use): the first fetch would download one of, in order: hooks/opencode/superpowers.ts, hooks/opencode/index.ts, plugin.ts, index.ts from https://github.com/obra/superpowers at the repository's default branch (resolved at fetch time) and EXECUTE it with this host process's full user rights. First-use fetching is opt-in, per oc-bifrost entry: set options.trustRemote: true, or set the environment variable OC_BIFROST_TRUST=github. Nothing was fetched and nothing was executed. A warm (hash-verified) cache never needs this consent.
+[oc-bifrost] refusing to fetch "github:obra/superpowers" (cold cache, first use): the first fetch would download the repository snapshot at the resolved commit (up to 16777216 compressed bytes), including one of, in order: hooks/opencode/superpowers.ts, hooks/opencode/index.ts, plugin.ts, index.ts from https://github.com/obra/superpowers at the repository's default branch (resolved at fetch time) and EXECUTE its entry file with this host process's full user rights. First-use fetching is opt-in, per oc-bifrost entry: set options.trustRemote: true, or set the environment variable OC_BIFROST_TRUST=github. Nothing was fetched and nothing was executed. A warm (hash-verified) cache never needs this consent.
 ```
 
 - Opt in on the bridge entry, or via the environment:
 
   ```jsonc
-  { "package": "@nathwn12/oc-bifrost@1.1.0", "options": { "trustRemote": true, "plugins": ["github:obra/superpowers"] } }
+  { "package": "@nathwn12/oc-bifrost@1.2.0", "options": { "trustRemote": true, "plugins": ["github:obra/superpowers"] } }
   ```
 
   `OC_BIFROST_TRUST=github` does the same from the environment; an explicit `trustRemote: false`

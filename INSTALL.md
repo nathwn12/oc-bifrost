@@ -21,7 +21,7 @@ package itself — there is no separate `npm i` step:
 {
   "plugins": [
     {
-      "package": "@nathwn12/oc-bifrost@1.0.1",
+      "package": "@nathwn12/oc-bifrost@1.1.0",
       "options": {
         "plugins": ["<exactly one specifier — one of the three paths below>"],
         "strict": false,
@@ -34,7 +34,7 @@ package itself — there is no separate `npm i` step:
 
 ### 1a. Choose the version form — then verify what resolved
 
-**Pin an exact version:** `"@nathwn12/oc-bifrost@1.0.1"` — the default and the version this page
+**Pin an exact version:** `"@nathwn12/oc-bifrost@1.1.0"` — the default and the version this page
 describes. `@^1.0.0` tracks 1.x and never adopts a new major silently. A bare `@nathwn12/oc-bifrost` or
 `@latest` may be unstable while OpenCode's plugin cache settles. State the form you used in your report.
 
@@ -86,7 +86,7 @@ what would be downloaded and both opt-ins:
 - Opt in on the bridge entry, or via the environment:
 
   ```jsonc
-  { "package": "@nathwn12/oc-bifrost@1.0.1", "options": { "trustRemote": true, "plugins": ["github:obra/superpowers"] } }
+  { "package": "@nathwn12/oc-bifrost@1.1.0", "options": { "trustRemote": true, "plugins": ["github:obra/superpowers"] } }
   ```
 
   `OC_BIFROST_TRUST=github` does the same from the environment; an explicit `trustRemote: false`

@@ -16,23 +16,41 @@ function asHandler(value: unknown): Handler | undefined {
 }
 
 /**
+ * The V1-era tool name for the bridged hook input. V2 registers the shell tool
+ * as `shell` (`packages/core/src/tool/plugin/shell.ts:22`); V1 plugins gate on
+ * `"bash"`. Presenting the V1 name is regression-safe: the vendored rtk
+ * accepts both spellings (`vendor/rtk.ts:20-21`), and any other V2 tool name
+ * passes through unchanged.
+ */
+function v1ToolName(tool: unknown): unknown {
+  return tool === "shell" ? "bash" : tool
+}
+
+const TERMINAL_EXECUTION_EVENTS = new Set([
+  "session.execution.succeeded",
+  "session.execution.failed",
+  "session.execution.interrupted",
+])
+
+/**
  * V2 event payload -> V1 `{ type, properties }` envelope, for the one event
  * both eras name: session idle.
  *
- * V2 replaced `session.idle` with `session.status` carrying
- * `{ sessionID, status: { type: "idle" | "busy" | "retry" } }`
- * (`packages/schema/src/session-status-event.ts:35-51`), and V2 payloads carry
- * `data`, not V1's `properties`. Without the synthesis a V1 hook that checks
- * `event.type === "session.idle"` never matches. The deprecated `session.idle`
- * event is still emitted by V2 and only needs its `properties` alias.
+ * Idle is synthesised from the terminal execution events - the durable events
+ * V2 emits when a session run ends (`packages/schema/src/session-event.ts:
+ * 246-257`). That is exactly how the client itself derives idle
+ * (`packages/client/src/solid/data.ts:1025-1028`); V2 payloads carry `data`,
+ * not V1's `properties`, so the terminal event needs its name and envelope
+ * translated for a V1 hook that checks `event.type === "session.idle"`. The
+ * deprecated `session.idle` event is still emitted by V2 and only needs its
+ * `properties` alias.
  *
  * Nothing else is translated: the two eras' names and payloads differ
  * elsewhere, and inventing more would be a lie.
  */
 function toV1Event(event: Record<string, unknown>): Record<string, unknown> {
   const data = (event.data ?? {}) as Record<string, unknown>
-  const status = data.status as { type?: unknown } | undefined
-  if (event.type === "session.status" && status?.type === "idle") {
+  if (TERMINAL_EXECUTION_EVENTS.has(event.type as string)) {
     return { ...event, type: "session.idle", properties: { sessionID: data.sessionID } }
   }
   if (event.type === "session.idle") {
@@ -57,7 +75,7 @@ export async function registerV1Hooks(
   const before = asHandler(table["tool.execute.before"])
   if (before) {
     await ctx.tool.hook("execute.before", async (event) => {
-      const input = { tool: event.tool, sessionID: event.sessionID, callID: String(event.id) }
+      const input = { tool: v1ToolName(event.tool), sessionID: event.sessionID, callID: String(event.id) }
       const output = { args: event.input }
       await before(input, output)
       if (output.args !== event.input) event.input = output.args
@@ -70,7 +88,7 @@ export async function registerV1Hooks(
   if (after) {
     await ctx.tool.hook("execute.after", async (event) => {
       const input = {
-        tool: event.tool,
+        tool: v1ToolName(event.tool),
         sessionID: event.sessionID,
         callID: String(event.id),
         args: event.input,
@@ -320,7 +338,7 @@ export async function registerV1Hooks(
     reporter.record(
       "event",
       "partial",
-      "V2 session.status[idle] synthesised to the V1 session.idle envelope; other names/payloads pass through",
+      "V2 session.execution.succeeded|failed|interrupted -> V1 session.idle envelope; other names/payloads pass through",
     )
   }
 

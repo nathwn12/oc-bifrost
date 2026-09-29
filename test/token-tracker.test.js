@@ -111,8 +111,8 @@ test(
     pushEvent({
       id: "evt_idle",
       created: 1,
-      type: "session.status",
-      data: { sessionID: "ses_main", status: { type: "idle" } },
+      type: "session.execution.succeeded",
+      data: { sessionID: "ses_main" },
     })
 
     await waitFor(() => contextCalls.length > 0)

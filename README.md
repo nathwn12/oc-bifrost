@@ -41,7 +41,7 @@ Restart OpenCode. **That's the whole setup** — the mount report names what bri
 
 A module named in `options.plugins` is routed by its **shape**, and only the V1 shape is hook-translated:
 
-- **V1 hook module** — a factory (a `default` async export, `{ server: factory }`, or a `*Plugin` named export). Its hooks are translated one by one against the [compatibility matrix](#-compatibility-matrix) below.
+- **V1 hook module** - a factory (a `default` async export, `{ server: factory }`, or any named function export - a `*Plugin` name is only the tie-breaker preference, `src/discover.ts`). Its hooks are translated one by one against the [compatibility matrix](#-compatibility-matrix) below.
 - **V2-shaped definition** — an `export default` carrying `{ id, setup | effect }`. It mounts **as-is** with the host context, exactly as the host itself would have mounted it. A **dual-export** file that ships both a V1 named export *and* a V2 default (for example `obra/superpowers@v6.4.2`) takes this path: the V2 default is used and the V1 named export is left untouched — no hook translation is applied to it.
 
 Sourcing is `github:` / a local path / a bundled `preset:` only. **npm and bare package names are refused** (`src/index.ts`); point at an installed copy by absolute path instead. And a plugin that needs one of the seven refused V1 hooks still needs a real port — the bridge will not fake it.
@@ -131,7 +131,7 @@ The unit of compatibility is the **V1 hook**, not the plugin — once a hook is 
 | `chat.message` | 🟡 partial | `ctx.session.hook("prompt")` |
 | `tool.definition` | 🟡 partial | `ctx.tool.transform` (apply-time snapshot) |
 | `tool` | 🟡 partial | `ctx.tool.transform` editor.add |
-| `event` | 🟡 partial | `ctx.event.subscribe()` — `session.status[idle]` synthesised to the V1 `session.idle` envelope; other names/payloads pass through |
+| `event` | 🟡 partial | `ctx.event.subscribe()` - V2 `session.execution.succeeded\|failed\|interrupted` synthesised to the V1 `session.idle` envelope; other names/payloads pass through |
 | `client.session.messages` | 🟡 partial | `ctx.session.context` — active context (post-compaction) only; the full transcript is HTTP-only |
 | `experimental.chat.system.transform` | 🟡 partial | `ctx.session.hook("context")` |
 | `experimental.chat.messages.transform` | 🟢 full | `ctx.session.hook("context")` — V1 `{info,parts}` envelope pre-fill + write-back |

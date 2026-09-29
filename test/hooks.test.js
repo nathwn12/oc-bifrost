@@ -437,27 +437,98 @@ test("bridge: string[] system transform round-trips", async () => {
   ])
 })
 
-test("bridge: messages transform registers a context hook", async () => {
+test("bridge: messages transform round-trips the V1 {info,parts} envelope", async () => {
+  // Mirrors BOTH real V1 plugins at once — model-announcer unshifts a synthetic
+  // part onto the last USER message's parts; agent-identity pairs messages.transform
+  // (stores info.agent by session) with system.transform (appends the identity
+  // line) and depends on messages firing FIRST in V1.
   const { ctx, fire } = fakeContext()
   const seen = []
+  const models = []
+  const agentBySession = new Map()
+  const order = []
   await registerV1Hooks(
     ctx,
     {
       "experimental.chat.messages.transform": async (input, output) => {
-        seen.push({ input, messages: output.messages })
-        output.messages = [{ info: { id: "replacement" }, parts: [] }]
+        seen.push(input)
+        order.push("messages")
+        const lastUser = output.messages.findLast((m) => m.info.role === "user")
+        assert.ok(lastUser, "pre-filled V1 envelope must expose the user message")
+        assert.equal(lastUser.info.role, "user")
+        assert.equal(lastUser.info.id, "m1")
+        assert.equal(lastUser.info.sessionID, "s")
+        assert.equal(lastUser.info.agent, "build")
+        models.push(lastUser.info.model)
+        lastUser.parts.unshift({
+          type: "text",
+          text: "[SYSTEM: CURRENT_MODEL_ANNOUNCEMENT - You are opencode-go/deepseek-v4-flash.]",
+          synthetic: true,
+        })
+        if (lastUser.info.agent) agentBySession.set(lastUser.info.sessionID, lastUser.info.agent)
+      },
+      "experimental.chat.system.transform": async (input, output) => {
+        order.push("system")
+        if (!input.sessionID) return
+        const agent = agentBySession.get(input.sessionID)
+        if (!agent) return
+        output.system.push(`You are currently operating as the "${agent}" agent.`)
       },
     },
     createReporter("messages", {}),
   )
-  const messages = [{ info: { id: "m1" }, parts: [] }]
-  const event = { sessionID: "s", messages }
+  const v2Messages = [
+    { id: "assistant-1", role: "assistant", content: [{ type: "text", text: "hi" }] },
+    { id: "m1", role: "user", content: [{ type: "text", text: "hello" }] },
+  ]
+  const event = {
+    sessionID: "s",
+    agent: "build",
+    // The real V2 Model.Ref shape (packages/schema/src/model.ts:18-22): `id` is
+    // the BARE model id; the provider is the separate `providerID` field.
+    model: { id: "deepseek-v4-flash", providerID: "opencode-go", variant: "max" },
+    messages: v2Messages,
+    system: [],
+  }
   await fire("session:context", event)
-  assert.deepEqual(seen[0].input, {})
-  assert.equal(seen[0].messages, messages, "the hook receives the live V2 message array")
-  // Partial contract: replacing output.messages is not written back to the event.
-  assert.equal(event.messages, messages)
-  assert.equal(event.messages[0].info.id, "m1")
+  assert.deepEqual(seen[0], { sessionID: "s" }, "the V1 hook input carries sessionID")
+  assert.deepEqual(
+    models[0],
+    { providerID: "opencode-go", modelID: "deepseek-v4-flash" },
+    "Model.Ref providerID + bare id must pre-fill info.model",
+  )
+  // Write-back: the synthetic part landed on the LAST USER message's content.
+  assert.equal(event.messages[1].content[0].text, "[SYSTEM: CURRENT_MODEL_ANNOUNCEMENT - You are opencode-go/deepseek-v4-flash.]")
+  assert.equal(event.messages[1].content[0].synthetic, true)
+  assert.equal(event.messages[1].content[0].type, "text")
+  // The assistant message is untouched — parts round-trip in place.
+  assert.equal(event.messages[0].id, "assistant-1")
+  assert.equal(event.messages[0].role, "assistant")
+  assert.deepEqual(event.messages[0].content, [{ type: "text", text: "hi" }])
+  // V1 fire order: messages.transform runs before system.transform.
+  assert.deepEqual(order.slice(0, 2), ["messages", "system"], "messages.transform must register before system.transform")
+  // The system write-back carried the agent stored by messages.transform.
+  assert.deepEqual(event.system, [
+    { type: "text", text: 'You are currently operating as the "build" agent.' },
+  ])
+
+  // Fallback: a string-only id still splits on the first '/' (nested ids keep the rest).
+  const stringOnlyEvent = {
+    sessionID: "s",
+    agent: "build",
+    model: { id: "opencode-go/deepseek/deepseek-chat" },
+    messages: v2Messages.map((m) => ({
+      ...m,
+      content: m.content.map((part) => ({ ...part })),
+    })),
+    system: [],
+  }
+  await fire("session:context", stringOnlyEvent)
+  assert.deepEqual(
+    models[1],
+    { providerID: "opencode-go", modelID: "deepseek/deepseek-chat" },
+    "string-only Model.Ref id must split on the first '/' with nested ids kept as modelID",
+  )
 })
 
 test("bridge: compacting appends context to the compaction system", async () => {

@@ -79,8 +79,26 @@ export const COMPAT_MATRIX: readonly MatrixRow[] = [
   {
     hook: "event",
     level: "partial",
-    v2: "ctx.event.subscribe()",
-    test: "bridge: event hook registers a subscription",
+    v2: "ctx.event.subscribe(); V2 session.status[idle] -> V1 session.idle envelope, other names/payloads pass through",
+    test: "bridge: session idle events are translated to the V1 envelope",
+  },
+  {
+    hook: "client.session.messages",
+    level: "partial",
+    v2: "ctx.session.context - active context only (messages after the last compaction); HTTP session.messages is unreachable",
+    test: "facade: session.messages returns the V1 envelope with tokens",
+  },
+  {
+    hook: "client.session.children",
+    level: "unsupported",
+    v2: "no plugin-scoped child listing; session.list?parentID is HTTP-only and the plugin ctx carries no server address (packages/plugin/src/promise/session.ts:153-170)",
+    test: "facade: session.children is refused out loud",
+  },
+  {
+    hook: "client.tui.showToast",
+    level: "unsupported",
+    v2: "no server-plugin toast surface; tui.toast.show is a TUI-process event (packages/plugin/src/promise/plugin.ts:26-54, packages/tui/src/app.tsx:1265)",
+    test: "facade: tui.showToast is refused out loud",
   },
   {
     hook: "dispose",

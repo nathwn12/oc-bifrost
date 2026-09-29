@@ -409,6 +409,42 @@ test("bridge: event hook registers a subscription", async () => {
   assert.equal(subscriptions[0].signal.aborted, true, "cleanup must abort the subscription")
 })
 
+test("bridge: session idle events are translated to the V1 envelope", async () => {
+  const { ctx, pushEvent } = fakeContext()
+  const seen = []
+  let delivered
+  const all = new Promise((resolve) => { delivered = resolve })
+  const result = await registerV1Hooks(
+    ctx,
+    {
+      event: async ({ event }) => {
+        seen.push(event)
+        if (seen.length === 3) delivered()
+      },
+    },
+    createReporter("idle", {}),
+  )
+
+  // V2's current idle signal is an ephemeral session.status event.
+  pushEvent({ id: "evt_status", created: 1, type: "session.status", data: { sessionID: "ses_a", status: { type: "idle" } } })
+  // The deprecated session.idle event is still emitted and keeps its own name.
+  pushEvent({ id: "evt_legacy", created: 2, type: "session.idle", data: { sessionID: "ses_b" } })
+  // Anything else passes through untouched: only idle has a V1 name to land on.
+  pushEvent({ id: "evt_busy", created: 3, type: "session.status", data: { sessionID: "ses_c", status: { type: "busy" } } })
+  await all
+
+  assert.equal(seen.length, 3)
+  assert.equal(seen[0].type, "session.idle")
+  assert.deepEqual(seen[0].properties, { sessionID: "ses_a" })
+  assert.equal(seen[0].id, "evt_status", "the V2 payload is preserved alongside the V1 envelope")
+  assert.equal(seen[1].type, "session.idle")
+  assert.deepEqual(seen[1].properties, { sessionID: "ses_b" })
+  assert.equal(seen[2].type, "session.status")
+  assert.deepEqual(seen[2].data, { sessionID: "ses_c", status: { type: "busy" } })
+
+  for (const cleanup of result.cleanups) await cleanup()
+})
+
 test("bridge: string[] system transform round-trips", async () => {
   const { ctx, fire } = fakeContext()
   const seen = []

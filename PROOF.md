@@ -510,3 +510,99 @@ Evidence: `%TEMP%\opencode\bifrost-evidence\model-announcer\` and
 - One model (opencode-go/deepseek-v4-flash#max), one host version (2.0.18), Windows. No Linux/macOS.
 - Evidence lives in `%TEMP%\opencode\bifrost-evidence\<plugin>\` — `REPORT.log`, transcripts,
   artifacts, `decidable.txt` summaries; the flight harness in `%TEMP%\opencode\bifrost-verdict\`.
+
+## Proof 10 — the token tracker: mounted live, verdict partial, and the toast the plugin swallows
+
+Date 2026-09-29. Build: `main @ 239c9bc` — the facade work merged as squash `239c9bc` (PR #13,
+"feat(facade): bridge client.session.messages; refuse children and tui.showToast with evidence").
+Live-mount evidence: OpenCode **2.0.18** (Windows), the operator's harness and its durable sink.
+The mechanism is decidable in the suite, which drives the **real cached plugin file**.
+
+### What the matrix says (this proof keeps the matrix's wording, not a paraphrase)
+
+Three facade rows and one event row were added or sharpened by this change:
+
+- `client.session.messages` — 🟡 **partial**. Destination `ctx.session.context`
+  (`src/compat-matrix.ts:85-90`): the facade returns the V1 `{ data: [{ info, parts }] }` envelope
+  with `tokens`, `time`, `cost`, `finish` and the `providerID`/`modelID` pair preserved
+  (`src/context.ts:56-78`), but it is the **active context only — messages after the last
+  compaction**. The full transcript is the HTTP route, unreachable from the plugin context: the V1
+  facade's `serverUrl` is a placeholder (`src/context.ts:137`) because V2 hands a plugin no real
+  server address.
+- `client.session.children` — 🔴 **refused** (`src/compat-matrix.ts:91-96`): V2 exposes no
+  plugin-scoped child-session listing; `session.list?parentID` is HTTP-only. Refused loudly at load
+  (`src/context.ts:54`) and on call (the session proxy, `src/context.ts:79-85`).
+- `client.tui.showToast` — 🔴 **refused** (`src/compat-matrix.ts:97-102`): no sanctioned
+  server-plugin publish surface; `tui.toast.show` is a **TUI-process event**. Refused loudly at load
+  (`src/context.ts:51-53`) and on call (`src/context.ts:113-122`).
+- `event` — 🟡 **partial**, and this is the trigger the tracker needs: a V2 `session.status` whose
+  `status.type` is `"idle"` is synthesised to the V1
+  `{ type: "session.idle", properties: { sessionID } }` envelope, and the deprecated `session.idle`
+  event gets its `properties` alias (`src/hooks.ts:32-42`).
+
+### The live mount (durable sink, operator's harness)
+
+`~/.cache/opencode/oc-bifrost/report.log` records the tracker mounting through the bridge — a fresh
+snapshot fetch, then cache loads on later starts:
+
+```
+[oc-bifrost:github:eserete/opencode-token-tracker@main#token-tracker.js] partial bridge for "event" — V2 event names/payloads differ from V1
+[oc-bifrost] github:eserete/opencode-token-tracker@main#token-tracker.js
+  mounted     v1:TokenTracker — V1 named export (TokenTrackerPlugin)
+  mounted     github:eserete/opencode-token-tracker — fetched github:eserete/opencode-token-tracker@main#token-tracker.js at commit 6a634805a65ae2b86f2dec9ec4d9905f113f0c03 as a repository snapshot (8 files, 53682 bytes materialized; tarball sha256 af6bc7429956…) (entry sha256 635c2a818794…, 7999 bytes; trust-on-first-use); executes with the host process's full user rights
+  partial     event — V2 event names/payloads differ from V1
+```
+
+The cache's own provenance record agrees (`meta.json`): `resolvedCommit` `6a634805…`,
+`token-tracker.js`, 7999 bytes, sha256 `635c2a8187942807492ee995643a6722dde87a8c23d577d9b9d55a6174384f40`,
+fetched `2026-09-29T07:34:33Z`.
+
+**Mounted is the whole of the live claim here.** The mount predates the #13 merge and ran the
+released bridge, so the live log cannot show the facade behaviour this proof is about; it does show
+the tracker's trigger never fired against that build — the log carries no tracker-caused refusal
+line anywhere (compare the announcer's repeated `client.provider.list is not provided…` lines), so
+no `session.messages`/`children`/`showToast` call ever escaped the plugin's guard. Post-#13, the
+synthesis above is what gives the tracker its trigger.
+
+### The mechanism of the silence (decidable, test-driven)
+
+`test/token-tracker.test.js` imports the real cached `token-tracker.js` (skipped only when the cache
+tree is absent, `:94-96`), discovers it as a V1 factory (`:102-105`), builds the V1 context and
+registers its hooks on the same bridge code this page documents (`:107-109`), then pushes a V2
+`session.status` idle event (`:111-116`). What the test proves, in the tracker's own source terms:
+
+- The synthesised idle event **reaches the tracker**: it calls `client.session.messages` with the
+  session id (`:121-125`; the tracker's `event` hook is `token-tracker.js:110-113`).
+- The tracker then calls `client.session.children` (`token-tracker.js:125`) — the **loud refusal
+  fires** and is recorded (`test/token-tracker.test.js:119`, `:130-133`:
+  `client.session.children is not provided by the V1 compatibility layer`; `:126-129` for the
+  load-time toast refusal).
+- The toast call (`token-tracker.js:187-189`) is **never reached** (`:134-138`), because the refusal
+  aborted the same `try` block the call sits in.
+- The refusal **never escapes the bridge**: the bridge's event loop reports `event hook threw` if a
+  handler throws (`src/hooks.ts:312-318`), and the test asserts that line is absent (`:139-143`).
+  The tracker's own blanket catch is what makes that silence: it swallows every error by design
+  (`token-tracker.js:190-192`; the comment in it reads "Silently ignore errors to avoid disrupting the session").
+
+So the verdict is exactly the matrix's, no more: **the tracker mounts live and its token read
+works; it still cannot toast — the plugin swallows the refusal.** The bridge's refusal is loud in
+the report (the durable sink carries it); the user-visible result is silence, and that choice
+belongs to the plugin.
+
+### The decision point
+
+A sanctioned toast equivalent does not exist in V2 for a server plugin: `tui.toast.show` is a
+TUI-process event (`packages/plugin/src/promise/plugin.ts:26-54`, `packages/tui/src/app.tsx:1265`),
+not a callable surface. Whether the bridge should grow one — a companion TUI entrypoint or an RPC
+design — is an **open design question for a separate PR**. Until then `client.tui.showToast` stays
+refused: never faked. (The facade already bridges `client.app.log` for plugins that can log instead —
+`src/context.ts:87-97` — but that substitution is a plugin-side change the tracker has not made.)
+
+### Honest scope of Proof 10
+
+- Proven: the live mount of the tracker through the bridge (durable sink + cache provenance); and
+  the facade behaviours above, test-driven **against the real cached plugin file** on this build.
+- Not proven here: any live host run of the post-#13 build with the tracker, and any user-visible
+  toast observation either way — the silence is proven as a code path, not filmed in a UI.
+- The end-to-end test **skips** when the cache tree is absent (`test/token-tracker.test.js:96`); the
+  suite proves the mechanism, this page records the provenance. One host (2.0.18), Windows.

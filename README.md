@@ -117,7 +117,7 @@ oc-bifrost bridges **hooks**, not a plugin's external dependencies: if a plugin 
 
 The unit of compatibility is the **V1 hook**, not the plugin — once a hook is bridged, every plugin that uses it works untouched.
 
-**5 🟢 full · 9 🟡 partial · 7 🔴 refused** — all 21 V1 hooks:
+**6 🟢 full · 9 🟡 partial · 9 🔴 refused** — all 24 matrix rows (21 V1 hooks + 3 client-facade methods):
 
 | V1 hook | Level | V2 destination |
 |---|---|---|
@@ -131,10 +131,13 @@ The unit of compatibility is the **V1 hook**, not the plugin — once a hook is 
 | `chat.message` | 🟡 partial | `ctx.session.hook("prompt")` |
 | `tool.definition` | 🟡 partial | `ctx.tool.transform` (apply-time snapshot) |
 | `tool` | 🟡 partial | `ctx.tool.transform` editor.add |
-| `event` | 🟡 partial | `ctx.event.subscribe()` — V2 event names differ |
+| `event` | 🟡 partial | `ctx.event.subscribe()` — `session.status[idle]` synthesised to the V1 `session.idle` envelope; other names/payloads pass through |
+| `client.session.messages` | 🟡 partial | `ctx.session.context` — active context (post-compaction) only; the full transcript is HTTP-only |
 | `experimental.chat.system.transform` | 🟡 partial | `ctx.session.hook("context")` |
 | `experimental.chat.messages.transform` | 🟢 full | `ctx.session.hook("context")` — V1 `{info,parts}` envelope pre-fill + write-back |
 | `experimental.session.compacting` | 🟡 partial | `ctx.session.hook("compaction")` |
+| `client.session.children` | 🔴 refused | no plugin-scoped child listing in V2 (HTTP-only; the plugin context carries no server address) |
+| `client.tui.showToast` | 🔴 refused | `tui.toast.show` is a TUI-process event; no server-plugin toast surface |
 | `config` | 🔴 refused | per-domain transforms with different semantics |
 | `auth` | 🔴 refused | `ctx.integration.transform` + integration APIs |
 | `provider` | 🔴 refused | `ctx.provider.transform` / `ctx.model.transform` |
@@ -149,7 +152,7 @@ The unit of compatibility is the **V1 hook**, not the plugin — once a hook is 
 
 ## 🙏 Honest bounds
 
-This bridges **the mappable subset**, not "any plugin, seamlessly." Seven of the twenty-one V1 hooks are refused out loud: no faithful V2 destination exists for their semantics, and no compatibility layer can invent one. Plugins that depend on those need a real port. The refusal list is the product being honest — and it is the contract.
+This bridges **the mappable subset**, not "any plugin, seamlessly." Nine of the twenty-four matrix rows are refused out loud (seven V1 hooks and two facade calls): no faithful V2 destination exists for their semantics, and no compatibility layer can invent one. Plugins that depend on those need a real port. The refusal list is the product being honest — and it is the contract.
 
 ---
 

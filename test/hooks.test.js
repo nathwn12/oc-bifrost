@@ -234,7 +234,9 @@ test("bridge: chat.message registers a prompt hook", async () => {
     {
       "chat.message": async (input, output) => {
         seen.push(input)
-        output.parts.push({ type: "text", text: "rewritten" })
+        // The V1 hook sees the message text pre-filled as a text part.
+        const part = output.parts.find((entry) => entry.type === "text")
+        if (part) part.text = "rewritten"
       },
     },
     createReporter("message", {}),
@@ -244,9 +246,54 @@ test("bridge: chat.message registers a prompt hook", async () => {
   assert.equal(seen.length, 1)
   assert.equal(seen[0].sessionID, "s")
   assert.equal(seen[0].messageID, "m")
-  // Partial contract: the V1 prompt write-back is not preserved on the V2 prompt event.
-  assert.equal(event.prompt.text, "original")
-  assert.equal(event.parts, undefined)
+  // The V1 text rewrite lands on the V2 prompt event: changed text parts are joined.
+  assert.equal(event.prompt.text, "rewritten")
+  assert.equal(event.parts, undefined, "the V1 parts envelope itself is not injected")
+})
+
+test("bridge: chat.message is idempotent for a no-op hook", async () => {
+  const { ctx, fire } = fakeContext()
+  await registerV1Hooks(
+    ctx,
+    { "chat.message": async () => {} },
+    createReporter("message", {}),
+  )
+  const event = { sessionID: "s", messageID: "m", prompt: { text: "original" } }
+  await fire("session:prompt", event)
+  assert.equal(event.prompt.text, "original", "a no-op hook leaves the pre-filled text untouched")
+})
+
+test("bridge: chat.message message.content replaces prompt text; partial parts are not injected", async () => {
+  const { ctx, fire } = fakeContext()
+  await registerV1Hooks(
+    ctx,
+    {
+      "chat.message": async (input, output) => {
+        output.message = { role: "user", content: "whole replacement" }
+        output.parts = [{ type: "text", text: "partial" }]
+      },
+    },
+    createReporter("message", {}),
+  )
+  const event = { sessionID: "s", messageID: "m", prompt: { text: "original" } }
+  await fire("session:prompt", event)
+  assert.equal(event.prompt.text, "whole replacement")
+})
+
+test("bridge: chat.message ignores a non-text write-back", async () => {
+  const { ctx, fire } = fakeContext()
+  await registerV1Hooks(
+    ctx,
+    {
+      "chat.message": async (input, output) => {
+        output.parts = [{ type: "tool", text: "not a text part" }, { text: "untyped" }]
+      },
+    },
+    createReporter("message", {}),
+  )
+  const event = { sessionID: "s", messageID: "m", prompt: { text: "original" } }
+  await fire("session:prompt", event)
+  assert.equal(event.prompt.text, "original", "only text parts are joined; nothing else is written")
 })
 
 test("bridge: tool.definition applies a snapshot through a transform", async () => {

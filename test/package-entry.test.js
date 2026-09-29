@@ -58,6 +58,18 @@ test("packaging: files ships everything the README links to", () => {
   }
 })
 
+test("packaging: the pinned version in INSTALL.md matches package.json", () => {
+  // INSTALL.md ships inside the tarball and is the page users copy a pin from.
+  // A release that bumps package.json but not this page publishes instructions
+  // one version stale — silent, and invisible to every functional test.
+  const install = fs.readFileSync(new URL("../INSTALL.md", import.meta.url), "utf8")
+  const pins = [...install.matchAll(/@nathwn12\/oc-bifrost@(\d+\.\d+\.\d+)/g)].map((m) => m[1])
+  assert.ok(pins.length > 0, "INSTALL.md must show at least one exact version pin")
+  for (const pin of pins) {
+    assert.equal(pin, pkg.version, `INSTALL.md pins ${pin}, but package.json is ${pkg.version}`)
+  }
+})
+
 test("packaging: the vendored preset entry exists where the preset points", () => {
   // preset.ts builds `new URL("../vendor/rtk.ts", import.meta.url)`; from dist/
   // that is the package-root vendor/rtk.ts. Prove the target really exists.

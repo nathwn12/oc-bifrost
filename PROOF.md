@@ -606,3 +606,110 @@ refused: never faked. (The facade already bridges `client.app.log` for plugins t
   toast observation either way — the silence is proven as a code path, not filmed in a UI.
 - The end-to-end test **skips** when the cache tree is absent (`test/token-tracker.test.js:96`); the
   suite proves the mechanism, this page records the provenance. One host (2.0.18), Windows.
+
+## Proof 11 — Flight 2: the second sampling, ten more plugins on the packed 1.3.0 tarball
+
+Date 2026-09-29. Host: OpenCode **2.0.18** (Windows, pinned `opencode.exe`), Node 24.21.0.
+
+**Purpose — owner peace-of-mind re-run.** Proof 9 flew ten awesome-opencode plugins on the packed
+1.2.0 tarball. Flight 2 repeats the exact exercise on a **disjoint roster** — ten plugins, none of
+them in `VERIFIED-PLUGINS.md` or any prior flight — through the **packed** 1.3.0 artifact, never
+the source tree. Nothing in the operator's live config or harness cache was read or written.
+
+**Artifact under test:** `nathwn12-oc-bifrost-1.3.0.tgz` — 117,159 bytes, sha256
+`56C529A48651ACB33BDD19CE402F600A6A72BD04D97EDA46CDEE9B8FAD12DF3B` — the 1.3.0 release merge
+`ea57ba7`. `npm run check` was 191/191 alongside the flight.
+
+### Method (the flight's own header notes, quoted)
+
+Every flight ran a real, isolated host: every opencode process spawned hidden through the
+windowless wrapper (`run-host-hidden.ps1`), each sandbox with its own `XDG_*` roots and its own
+copy of the credential DB — a consistent `sqlite3 .backup` snapshot, taken once and copied in by
+pointer:
+
+> All ten were flown on a real, isolated **OpenCode 2.0.18** host (Windows, pinned `opencode.exe`),
+> through the **packed** bridge artifact — never the source tree. Nothing in the operator's live
+> config or harness cache was read or written; every sandbox carried its own `XDG_*` roots and its
+> own copy of the credential DB (a consistent `sqlite3 .backup` snapshot, taken once and copied in
+> by pointer). Every opencode process was spawned hidden, via the windowless wrapper.
+
+**Route note (adaptation, stated):** the wrapper implements `serve` + `run --server`; this flight
+used that route rather than `run --standalone`, because under `--standalone` the host serves
+JSON-RPC on stdio and plugin `console.log`/report output is dropped, while the serve route writes
+plugin stdout to a captured log. Both processes were still spawned windowless through the wrapper.
+
+Verdict vocabulary was the Proof 9 bar: `full` needs a live write-back proof, not a mount line;
+`partial` names a loss; `refused` means refused out loud. A prerequisite the plugin declares is
+not the bridge's job.
+
+### The verdicts — 1 full · 5 partial · 3 refused · 1 provisioned
+
+| # | Plugin (pinned spec) | Verdict | Decidable evidence |
+|---|---|---|---|
+| 1 | romain325/opencode-hooks-plugin `55d5cfa1…` `src/index.ts` | 🟢 **full** | PreToolUse returned `updatedInput`; host spawn log shows the mutated `echo BIFROST_HOOK_REWRITTEN` executed (asked: `echo ORIGINAL_COMMAND`); Pre/PostToolUse markers ordered around real execution |
+| 2 | VincentHardouin/opencode-snip `1cc9b020…` `src/index.ts` | 🟡 **partial** | mounts with a `full` row, but gates on `input.tool === "bash"` vs V2 `shell`; `git status --porcelain` ran unrewritten |
+| 3 | tlinhart/opencode-system-prompt-logger `66999afe…` `index.ts` | 🔴 **refused** | `no V1 factory... export found` — factory named `SystemPromptLogger`, missed by the `/Plugin$/` heuristic |
+| 4 | simonwjackson/opencode-direnv `f257fa7f…` `src/index.ts` | 🔴 **refused** | same discovery skip (`DirenvLoader`); `$env:DIRENV_FLIGHT2` unset proves it never ran |
+| 5 | arttttt/opencode-pr-signature `44a44b3f…` `src/entry/legacy.ts` | 🟡 **partial** | mounted, both hooks registered, but the commit ran **unsigned** (`git-log.txt` empty body) — `SHELL_TOOL = "bash"` gate again |
+| 6 | Zaradacht/opencode-host-notify-bridge `7f841fa6…` `index.js` `{"enabled":true}` | 🟡 **partial** | V1-module route mounted; local listener on `127.0.0.1:8765` captured **zero** POSTs — no `session.idle` in the 2.0.18 plugin feed |
+| 7 | pawelma/opencode-autotitle `40430fbc…` `src/index.ts` | 🟡 **partial** | own debug log proves the live V2 feed (25+ event types), but zero `message.part.updated` / `session.idle` — inert on 2.0.18 |
+| 8 | Octane0411/opencode-plugin-openspec `54864428…` `src/index.ts` | 🔴 **refused** | OpenSpec detection satisfied; its single `config` hook refused out loud — matrix row working as designed |
+| 9 | sun-praise/opencode-review `e8ecabe3…` `src/index.ts` | 🟡 **provisioned** | run 1 refused (`Cannot find package '@opencode-ai/plugin'`); with that package junctioned inside the sandbox, run 2's `tools.toggle_auto_review({enabled:false})` → 「Auto-review is now OFF.」 |
+| 10 | RoderickQiu/opencode-workaholic `767d23bb…` `src/index.ts` | 🔴 **refused** | snapshot guard refused the archive before materialization — `.mise/tasks/lint:fix` carries a Windows ADS colon; nothing cached, nothing executed |
+
+### Evidence inventory — 11 dirs under `%TEMP%\opencode\bifrost-evidence-2\`
+
+`hooks-plugin\`, `hooks-plugin-mutation\`, `snip\`, `system-prompt-logger\`, `direnv\`,
+`pr-signature\`, `host-notify-bridge\`, `autotitle\`, `openspec\`, `opencode-review\`,
+`workaholic\` — each with the flight's standard set: `REPORT.log` (durable sink mount block),
+`decidable.txt` (the verdict argument), `mount-lines.txt`, `transcript.txt`(+err), `server.*.log`,
+`run-status.txt`, `launcher-serve.txt`, `db-tables.txt`; plugin-specific artifacts per row
+(`hooks-plugin-mutation\work\HOOK_PRETOOLUSE.txt`, `pr-signature\git-log.txt`,
+`host-notify-bridge\notify-posts.log`, `autotitle\autotitle.log`, `direnv\work\`), plus the flight
+verdict table itself at `%TEMP%\opencode\bifrost-evidence-2\VERDICTS.md`. The row-by-row record
+(with the `1 full · 5 partial · 3 refused · 1 provisioned` counts) is in `VERIFIED-PLUGINS.md`,
+Flight 2.
+
+### Cleanup — confirmed at record time
+
+The flight's working area (`fly2` sandbox + harness) and the credential-DB snapshot are **deleted**:
+no `fly2` directory and no `.backup`/snapshot DB file remain under `%TEMP%` (checked to depth 3
+when this proof was written). The `bifrost-evidence-2` dirs above are kept as the evidence record —
+the same policy Flight 1's `bifrost-evidence` follows. Nothing outside the sandboxes was read
+except the one `sqlite3 .backup` read, and it was a copy-by-pointer provisioning step.
+
+### Findings for the bridge — deferred, deliberately (findings, not fixes)
+
+These came out of Flight 2 and are recorded for the bridge's next PRs. **They are findings, not
+fixes**: nothing in the bridge changed for this flight, and each fix below belongs in a separate,
+scoped PR with its own test.
+
+1. **Discovery heuristic misses legitimate V1 factories** — `src/discover.ts:34` accepts named
+   exports only when the name matches `/Plugin$|plugin$|^plugin$|^Plugin$/`. Two first-class V1
+   factories (`SystemPromptLogger`, `DirenvLoader`) were skipped loudly. A shape check (function
+   export) rather than a name check would widen the gate without guessing.
+2. **Tool-name fidelity for V1-era plugins** — the bridge passes the V2 tool id verbatim
+   (`src/hooks.ts`: `tool: event.tool`). V2 names its shell tool **`shell`**
+   (`packages/core/src/tool/plugin/shell.ts:22`; V1 migration `bash` -> `shell` at
+   `packages/core/src/v1/config/migrate.ts:120`), while V1-era plugins gate on `"bash"`
+   (snip, pr-signature, workaholic). Those plugins mount and register, then silently no-op.
+   RTK works only because its vendor accepts both names.
+3. **Event vocabulary** — V2 2.0.18's plugin feed carried `session.execution.*`, `session.step.*`,
+   `session.text.*`, `session.usage.updated`, `session.renamed`, `model/provider/plugin.updated`
+   (autotitle debug log) with **no** `session.status`/`session.idle` observable, so the matrix's
+   documented `session.status[idle] -> session.idle` synthesis never fired for the two plugins that
+   rely on it (autotitle, host-notify-bridge). The `partial` event row is accurate; the mapping
+   may be stale for this host version.
+4. **Working as designed, worth knowing** — the snapshot guard refused `RoderickQiu/opencode-workaholic`
+   because of an archive entry with `:`. On Windows, repos containing such names (e.g. `.mise/tasks/lint:fix`)
+   cannot be materialized; the refusal is loud and nothing executes. Not a defect to fix blindly.
+
+### Honest scope of Proof 11
+
+- Proven: ten **new** plugins (disjoint from every prior roster) through the **packed 1.3.0**
+  tarball on a real 2.0.18 host — 1 full write-back, 5 partial with named losses, 3 refused out
+  loud with named mechanisms, 1 provisioned pass; each with a decidable artifact.
+- One host (`2.0.18`), one OS (Windows), one model (`opencode-go/deepseek-v4-flash`), one artifact
+  (the packed 1.3.0 tarball). Linux/macOS untested; re-run on each OpenCode release.
+- No repository was changed by the flight; nothing was published; the credential snapshot existed
+  only for provisioning and is deleted.

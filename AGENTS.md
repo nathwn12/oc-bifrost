@@ -35,6 +35,7 @@ One OpenCode V2 plugin (`src/index.ts`) that imports plugin modules of any era a
 | `src/context.ts` | V1 `PluginInput` facade (`client`, `project`, `$`) |
 | `src/shell.ts` | BunShell facade (Bun's `$` when present, portable shim otherwise) |
 | `src/report.ts` | The honesty layer — full/partial/refused reporting |
+| `src/sink.ts` | Durable report mirror — the file that survives discarded stdout |
 | `src/compat-matrix.ts` | The contract |
 | `test/` | Node test runner; imports from `dist/` |
 

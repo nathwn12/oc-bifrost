@@ -13,13 +13,31 @@ export interface Reporter {
   readonly reports: HookReport[]
 }
 
-export function createReporter(id: string, opts: { strict?: boolean; verbose?: boolean } = {}): Reporter {
+export interface ReporterOptions {
+  strict?: boolean
+  verbose?: boolean
+  /**
+   * Durable mirror of every emitted line. The host discards stdout when it runs
+   * as a background service or a stdio server, so console-only reporting is
+   * unreachable there; the sink is the proof surface that survives. Best-effort:
+   * a throwing sink must never break a mount.
+   */
+  sink?: (line: string) => void
+}
+
+export function createReporter(id: string, opts: ReporterOptions = {}): Reporter {
   const reports: HookReport[] = []
   const tag = `[oc-bifrost:${id}]`
 
   const emit = (message: string) => {
     // OpenCode's plugin host surfaces console output; keep it loud and greppable.
-    console.warn(`${tag} ${message}`)
+    const line = `${tag} ${message}`
+    console.warn(line)
+    try {
+      opts.sink?.(line)
+    } catch {
+      // Reporting is additive; a broken sink is the sink's problem, not a mount's.
+    }
   }
 
   return {

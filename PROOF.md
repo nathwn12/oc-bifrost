@@ -285,12 +285,48 @@ both mount reports:
 - An unrelated host restart mid-install left a partial `node_modules` (the shim then failed to
   resolve `@opencode/schema`); a clean reinstall fixed it. Environment, not the package.
 
+### The real dual-export file, same method
+
+The one thing Proof 6 above left open — a **real-world** dual-export plugin, fetched by source.
+Same sandbox shape, one config entry:
+
+```
+"github:obra/superpowers@v6.4.2#.opencode/plugins/superpowers.js"   (trustRemote: true)
+```
+
+The bridge's own report, from the durable sink written inside the sandbox:
+
+```
+[oc-bifrost] github:obra/superpowers@v6.4.2#.opencode/plugins/superpowers.js
+  mounted     v2:superpowers - V2 setup invoked with the host context
+  mounted     github:obra/superpowers - fetched github:obra/superpowers@v6.4.2#.opencode/plugins/superpowers.js at commit 8ca22dba9a94f28898bbce59f2537ff4d87c747d (sha256 c979fe5a9fd6., 17617 bytes; trust-on-first-use); executes with the host process's full user rights
+```
+
+- The fetched artifact matches its own provenance record — sha256 recomputed as `c979fe5a…`,
+  17617 bytes — and it is genuinely dual-export: a V1 named export (`SuperpowersPlugin`,
+  `plugin.ts:219`) **and** a V2 `export default { id: "superpowers", server: SuperpowersPlugin, setup }`
+  (`plugin.ts:379-383`).
+- `mounted v2:superpowers` is emitted only *after* `setup` returns (`src/index.ts:258-261`), and that
+  `setup` early-returns unless `ctx.skill.transform` and `ctx.session.hook` are functions — the live
+  host context supplies both (`@opencode/plugin/dist/promise/adapter.js:321,418`), so the body ran,
+  not merely the early return.
+- **What this does not claim:** any *downstream* effect. The skills directory `setup` resolves was
+  absent in the sandbox, so it loaded zero skills and injected nothing — recorded as
+  "no observable effect in a headless run", never inferred. The plugin also swallows its own errors,
+  so a returned `setup` is not proof that a transform or a hook succeeded.
+
+Pack note: this run packed `nathwn12-oc-bifrost-1.1.0.tgz` at `b80f860` (84954 bytes, sha256
+`8fe69a2d…`); the executable bytes are the ones flown above at `54a1191` — the two packs differ only
+in these docs.
+
 ### Honest scope of Proof 6
 
 - Proven here: artifact discovery and load from the packed tarball; V1 hook translation with
   `tool.execute.before` write-back to real execution; the **V2 pass-through route** (`setup`
-  invoked with the live context); the durable sink.
-- Not exercised here: `preset:rtk`, the `github:` fetch route, Linux/macOS.
+  invoked with the live context) for both a minimal definition and the real dual-export file above;
+  the durable sink; and the `github:` fetch route with its provenance check.
+- Not exercised here: `preset:rtk`, Linux/macOS. Downstream effects of a V2 plugin's `setup` are not
+  observable headlessly (the fixture above neither loaded a skill nor injected context).
 - One host version (2.0.18). Re-run on each OpenCode release before trusting it there.
 
 ## Reproduce

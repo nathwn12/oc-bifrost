@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 1.4.0 (2026-09-29)
 
 ### Changed
 
@@ -18,8 +18,12 @@
   session run ends (`packages/schema/src/session-event.ts:246-257`, exactly what the client's own
   idle derivation reads at `packages/client/src/solid/data.ts:1025-1028`) - are translated to the
   V1 `session.idle` envelope. `session.status` never reaches the plugin feed on 2.0.18, so the
-  earlier synthesis is gone rather than kept as a dead path. All other event names and payloads
-  pass through unchanged.
+  earlier synthesis is gone rather than kept as a dead path. The matrix event row matches. All
+  other event names and payloads pass through unchanged.
+- **The docs record the dogfood run and the compat merge.** Flight 2 sampled ten plugins
+  against the packed artifact and its verdicts are recorded (PROOF.md Proof 11,
+  VERIFIED-PLUGINS.md), and README.md / SKILL.md pin 1.4.0 with the matrix agreeing with
+  `src/compat-matrix.ts`.
 
 ### Checks
 

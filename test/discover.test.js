@@ -15,6 +15,49 @@ test("discover: V1 named Plugin export", () => {
   assert.equal(result.factory, factory)
 })
 
+test("discover: V1 named export is discovered by SHAPE when the name has no Plugin suffix", () => {
+  // tlinhart/opencode-system-prompt-logger exports only `SystemPromptLogger` -
+  // a textbook V1 factory whose name the legacy `/Plugin$/` heuristic missed.
+  // The shape check (a named function export is a factory by the V1 contract)
+  // must accept it regardless of the name.
+  const factory = async () => ({ "experimental.chat.system.transform": async () => {} })
+  const result = discover({ SystemPromptLogger: factory }, "index.ts")
+  assert.equal(result.kind, "v1")
+  assert.equal(result.id, "SystemPromptLogger")
+  assert.equal(result.factory, factory)
+  assert.match(result.note, /by shape/)
+})
+
+test("discover: another suffixless V1 factory (DirenvLoader-shaped) is discovered by shape", () => {
+  // simonwjackson/opencode-direnv exports only `DirenvLoader`.
+  const factory = async () => ({ event: async () => {} })
+  const result = discover({ DirenvLoader: factory }, "src/index.ts")
+  assert.equal(result.kind, "v1")
+  assert.equal(result.id, "DirenvLoader")
+  assert.equal(result.factory, factory)
+})
+
+test("discover: a plugin-named export still wins over an earlier helper function", () => {
+  // The legacy name heuristic stays as the PREFERENCE: when a module exports
+  // several functions, the one whose name ends in Plugin is chosen even when
+  // a helper export comes first in module order - the shape pass alone would
+  // mis-pick the helper.
+  const plugin = async () => ({})
+  const helper = async () => {}
+  const result = discover({ helper, MySpecialPlugin: plugin }, "special.ts")
+  assert.equal(result.kind, "v1")
+  assert.equal(result.factory, plugin)
+})
+
+test("discover: a suffixless helper-only module is still refused when no export is a factory", () => {
+  // Shape recognition widens the gate to named FUNCTIONS only; a module whose
+  // exports are all non-functions is not a V1 factory and stays refused out
+  // loud - including names that merely look plugin-ish.
+  const result = discover({ SystemPromptLogger: { init: true } }, "not-a-plugin.ts")
+  assert.equal(result.kind, "unknown")
+  assert.match(result.reason, /no V1 factory/)
+})
+
 test("discover: V1 module server export", () => {
   const server = async () => ({})
   const result = discover({ id: "legacy.mod", server }, "mod.ts")

@@ -6,12 +6,17 @@ Verified end-to-end on an **isolated OpenCode V2 host**. Nothing in the operator
 |---|---|
 | Date | 2026-09-28 |
 | Host | OpenCode **2.0.18** (Windows, `opencode.exe`) |
-| oc-bifrost | Two builds — **0.1.0** (Proofs 1–4) and **0.2.0** (Proof 5); see each proof |
+| oc-bifrost | Three builds — **0.1.0** (Proofs 1–4), **0.2.0** (Proof 5) and **1.1.0** (Proof 6); see each proof |
 | Node | 24.21.0 |
 
 > **Build scope (annotated 2026-09-28).** Proofs 1–3 were verified on `main @ 9561606` (0.1.0),
 > Proof 4 on the published `0.1.0` npm package, and Proof 5 on the packed `0.2.0` tarball. The repo
 > has since moved to `0.3.0` (`main @ 50284db`), and none of these proofs have been re-run there.
+>
+> **Proof 6 (added 2026-09-29).** The first proof run on a current build: the packed **1.1.0**
+> tarball from `chore/release-1-1-0 @ 54a1191`. It carries the whole load again — artifact load,
+> V1 write-back, and the V2 pass-through route — so this page's oldest sentence above stays honest:
+> Proofs 1–5 have still not been re-run on their own later builds.
 
 ## Isolation method
 
@@ -210,6 +215,120 @@ level=WARN message="configured plugin path must be a directory" target=.../dist/
 
 The sandbox entry is therefore a directory (`plugins/oc-bifrost/` with `index.js` + `package.json`). See the README install section.
 
+## Proof 6 — the packed 1.1.0 tarball, both eras in one isolated host
+
+Verified build: `@nathwn12/oc-bifrost@1.1.0` — the **packed tarball**
+`nathwn12-oc-bifrost-1.1.0.tgz`, 83517 bytes, sha256
+`d2b53d6029ea0107357c19842ccf58e884c67b254beab73745b4e3c101e1f23a`, packed from
+`chore/release-1-1-0 @ 54a1191`.
+
+| Field | Value |
+|---|---|
+| Date | 2026-09-29 |
+| Host | OpenCode **2.0.18** (Windows) |
+| Artifact | `nathwn12-oc-bifrost-1.1.0.tgz` (sha256 above); `testflight .` exit 0 |
+| Node | 24.21.0 |
+
+Method: the Proof 5 shape — pack, install, directory shim, isolated host — with two corrections
+this run had to make (below). The config mounted exactly two local fixtures: a V1 factory and a V2
+`{ id, setup }` definition. `npm run check` was 155/155 alongside it.
+
+**V1 lane — the mutation reaches real execution.** The agent asked for `echo hello`; the host's own
+spawn log shows what ran:
+
+```
+message="spawning process" command="...pwsh.EXE"
+  args=[ ... ,"-Command","echo hello && echo BIFROST_BRIDGED_V1"]
+```
+
+```
+BIFROST_BRIDGED_V1
+```
+
+**V2 lane — the definition's `setup` ran with the live host context:**
+
+```
+V2_SETUP_RAN ctx_keys=agent,aisdk,app,command,event,experimental,generate,integration,
+location,mcp,model,options,permission,plugin,provider,reference,rpc,session,shell,
+skill,storage,tool,vcs,websearch,worktree
+```
+
+**The durable sink.** With `OC_BIFROST_REPORT` pointed inside the sandbox, `report.log` carried
+both mount reports:
+
+```
+[oc-bifrost] .../config/v1-plugin.mjs
+  full        tool.execute.before - mutable event.input write-back
+  mounted     v1:v1-plugin - V1 default export
+[oc-bifrost] .../config/v2-plugin.mjs
+  mounted     v2:flight.v2 - V2 setup invoked with the host context
+```
+
+### Two traps this run found
+
+1. **Isolation needs the XDG roots as well.** `OPENCODE_CONFIG_DIR` +
+   `OPENCODE_DISABLE_PROJECT_CONFIG` do not move `data`/`cache`/`state`: with only those set, the
+   host still resolved them under the operator's real `~/.local/share`, `~/.cache` and
+   `~/.local/state` (`packages/util/src/global-roots.ts:5-8`). Add
+   `XDG_CACHE_HOME` / `XDG_DATA_HOME` / `XDG_STATE_HOME`.
+2. **A shim inside `<config>/plugins/` silently starves `options.plugins`.** `plugin/` and
+   `plugins/` are host auto-discovery directories; the host loads its own copy from there with
+   `options: {}`, so the bridge reports "no plugins configured" and the configured entry never
+   supplies options. Keep the shim outside any discovery directory.
+
+### Also worth knowing
+
+- The V1 write-back target is `output.args.command`, not `input.command` (`src/hooks.ts:35-37`).
+- Under `--standalone` the host serves stdio, so the plugin's `console.log` report is dropped on
+  the JSON-RPC stdout channel — only `console.warn` surfaced. This run is a live demonstration of
+  why the sink exists: the sink wrote the same block `console.log` receives (`src/index.ts:306-308`).
+- An unrelated host restart mid-install left a partial `node_modules` (the shim then failed to
+  resolve `@opencode/schema`); a clean reinstall fixed it. Environment, not the package.
+
+### The real dual-export file, same method
+
+The one thing Proof 6 above left open — a **real-world** dual-export plugin, fetched by source.
+Same sandbox shape, one config entry:
+
+```
+"github:obra/superpowers@v6.4.2#.opencode/plugins/superpowers.js"   (trustRemote: true)
+```
+
+The bridge's own report, from the durable sink written inside the sandbox:
+
+```
+[oc-bifrost] github:obra/superpowers@v6.4.2#.opencode/plugins/superpowers.js
+  mounted     v2:superpowers - V2 setup invoked with the host context
+  mounted     github:obra/superpowers - fetched github:obra/superpowers@v6.4.2#.opencode/plugins/superpowers.js at commit 8ca22dba9a94f28898bbce59f2537ff4d87c747d (sha256 c979fe5a9fd6., 17617 bytes; trust-on-first-use); executes with the host process's full user rights
+```
+
+- The fetched artifact matches its own provenance record — sha256 recomputed as `c979fe5a…`,
+  17617 bytes — and it is genuinely dual-export: a V1 named export (`SuperpowersPlugin`,
+  `plugin.ts:219`) **and** a V2 `export default { id: "superpowers", server: SuperpowersPlugin, setup }`
+  (`plugin.ts:379-383`).
+- `mounted v2:superpowers` is emitted only *after* `setup` returns (`src/index.ts:258-261`), and that
+  `setup` early-returns unless `ctx.skill.transform` and `ctx.session.hook` are functions — the live
+  host context supplies both (`@opencode/plugin/dist/promise/adapter.js:321,418`), so the body ran,
+  not merely the early return.
+- **What this does not claim:** any *downstream* effect. The skills directory `setup` resolves was
+  absent in the sandbox, so it loaded zero skills and injected nothing — recorded as
+  "no observable effect in a headless run", never inferred. The plugin also swallows its own errors,
+  so a returned `setup` is not proof that a transform or a hook succeeded.
+
+Pack note: this run packed `nathwn12-oc-bifrost-1.1.0.tgz` at `b80f860` (84954 bytes, sha256
+`8fe69a2d…`); the executable bytes are the ones flown above at `54a1191` — the two packs differ only
+in these docs.
+
+### Honest scope of Proof 6
+
+- Proven here: artifact discovery and load from the packed tarball; V1 hook translation with
+  `tool.execute.before` write-back to real execution; the **V2 pass-through route** (`setup`
+  invoked with the live context) for both a minimal definition and the real dual-export file above;
+  the durable sink; and the `github:` fetch route with its provenance check.
+- Not exercised here: `preset:rtk`, Linux/macOS. Downstream effects of a V2 plugin's `setup` are not
+  observable headlessly (the fixture above neither loaded a skill nor injected context).
+- One host version (2.0.18). Re-run on each OpenCode release before trusting it there.
+
 ## Reproduce
 
 ```pwsh
@@ -236,6 +355,7 @@ opencode run --auto --standalone --print-logs "Run this exact shell command: ech
 ## Honest scope of this proof
 
 - Proven in the host runs: discovery, V1 context facade, `$` shell, and `tool.execute.before` write-back to execution.
+- Proven in a host run as of Proof 6: the V2 pass-through route (a definition's `setup` invoked with the live host context) and the durable report sink.
 - Proven by the test suite, not by a host run here: `tool.execute.after` and refusal reporting (`test/hooks.test.js`; `test/matrix.test.js`).
 - Not proven here: the `partial` and `unsupported` rows of the matrix under load, and behaviour on Linux/macOS.
 - One host, one version (2.0.18). Re-run on each OpenCode release before trusting it there.

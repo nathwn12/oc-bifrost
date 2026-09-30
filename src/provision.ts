@@ -82,6 +82,34 @@ function depDestination(treeDir: string, name: string): string {
   return path.join(treeDir, "node_modules", ...name.split("/"))
 }
 
+/** A valid npm package name: optionally `@scope/`, then a safe basename. */
+const PACKAGE_NAME_PATTERN = /^(@[A-Za-z0-9._-]+\/)?[A-Za-z0-9._-]+$/
+
+function isValidPackageName(name: string): boolean {
+  return PACKAGE_NAME_PATTERN.test(name)
+}
+
+/** Neutralize control characters in an untrusted name before it reaches a report. */
+function sanitizeName(name: string): string {
+  const escaped = name.replace(/[\u0000-\u001f\u007f\u0080-\u009f]/g, (c) =>
+    `\\u${c.charCodeAt(0).toString(16).padStart(4, "0")}`,
+  )
+  return escaped.length > 200 ? `${escaped.slice(0, 200)}...(truncated)` : escaped
+}
+
+/** The `node_modules` root under the tree. */
+function nodeModulesRoot(treeDir: string): string {
+  return path.join(treeDir, "node_modules")
+}
+
+/** A (validated) name's destination, or null when it escapes `<tree>/node_modules`. */
+function safeDestination(treeDir: string, name: string): string | null {
+  const dest = depDestination(treeDir, name)
+  const rel = path.relative(nodeModulesRoot(treeDir), dest)
+  if (rel === "" || rel.startsWith("..") || path.isAbsolute(rel)) return null
+  return dest
+}
+
 /** True when `p` exists as ANY entry type (file, dir, or link) - `lstat`, never follows. */
 function pathExists(p: string): boolean {
   try {
@@ -280,7 +308,13 @@ function resolveFromNpmCache(store: string, name: string): string | null {
   }
   const prefix = `${basename}@`
   const versionDirs = entries
-    .filter((e) => e.isDirectory() && e.name.startsWith(prefix) && e.name.length > prefix.length)
+    .filter(
+      (e) =>
+        e.isDirectory() &&
+        e.name.startsWith(prefix) &&
+        e.name.length > prefix.length &&
+        isNumericVersion(versionOf(e.name)),
+    )
     .map((e) => e.name)
   versionDirs.sort((a, b) => compareVersionDirNamesDesc(a, b))
   for (const versionDir of versionDirs) {
@@ -294,7 +328,9 @@ function resolveFromNpmCache(store: string, name: string): string | null {
     }
     for (const cacheId of cacheIds) {
       if (!cacheId.isDirectory()) continue
-      const candidate = path.join(versionPath, cacheId.name, "node_modules", basename)
+      // Scoped packages keep their scope segment under node_modules:
+      // `node_modules/@scope/<name>`, never `node_modules/<name>`.
+      const candidate = path.join(versionPath, cacheId.name, "node_modules", ...name.split("/"))
       if (isRealDirectory(candidate)) return candidate
     }
   }
@@ -304,6 +340,11 @@ function resolveFromNpmCache(store: string, name: string): string | null {
 function versionOf(dirName: string): string {
   const at = dirName.indexOf("@")
   return at === -1 ? "" : dirName.slice(at + 1)
+}
+
+/** A version dir is a real version (not an `@latest`/`@next` alias) when it starts with a digit. */
+function isNumericVersion(version: string): boolean {
+  return /^[0-9]/.test(version)
 }
 
 function compareVersionDirNamesDesc(a: string, b: string): number {
@@ -328,11 +369,21 @@ function compareVersionsDesc(a: string, b: string): number {
   return 0
 }
 
-function linkIntoTree(source: string, dest: string): void {
-  fs.mkdirSync(path.dirname(dest), { recursive: true })
-  // "junction" is a directory link that needs no elevation on Windows; the
-  // type argument is ignored on other platforms (a plain symlink is made).
-  fs.symlinkSync(source, dest, "junction")
+/** Junction `source` into `dest`; false (never a throw) when the link cannot be created. */
+function linkIntoTree(source: string, dest: string): boolean {
+  try {
+    fs.mkdirSync(path.dirname(dest), { recursive: true })
+    // "junction" is a directory link that needs no elevation on Windows; the
+    // type argument is ignored on other platforms (a plain symlink is made).
+    fs.symlinkSync(source, dest, "junction")
+    return true
+  } catch {
+    // EPERM/EACCES/EEXIST/reparse-unsupported volumes are a loud refusal, not a
+    // thrown error (R-4: junction-with-loud-refusal, no copy fallback). The
+    // package name (already validated, control-char-free) is what reaches the
+    // report; the raw fs error never does.
+    return false
+  }
 }
 
 /** Run `npm install --no-save --prefix <treeDir>`; true when it exits 0. */
@@ -358,15 +409,31 @@ export async function provisionTree(
   const report: ProvisionReport = { actions: [], refused: [] }
   const npmPending: string[] = []
   for (const name of declared) {
-    const dest = depDestination(treeDir, name)
+    if (!isValidPackageName(name)) {
+      report.refused.push(sanitizeName(name))
+      continue
+    }
+    const dest = safeDestination(treeDir, name)
+    if (dest === null) {
+      // Unreachable after name validation; kept as a fail-closed guard.
+      report.refused.push(sanitizeName(name))
+      continue
+    }
     if (pathExists(dest)) {
       report.actions.push({ package: name, source: "skip", target: dest })
       continue
     }
     const source = resolveFromHostStores(opts.hostStores ?? [], name)
     if (source !== null) {
-      report.actions.push({ package: name, source: "host", target: source })
-      if (opts.dryRun !== true) linkIntoTree(source, dest)
+      if (opts.dryRun === true) {
+        report.actions.push({ package: name, source: "host", target: source })
+        continue
+      }
+      if (linkIntoTree(source, dest)) {
+        report.actions.push({ package: name, source: "host", target: source })
+      } else {
+        report.refused.push(name)
+      }
       continue
     }
     npmPending.push(name)
@@ -402,7 +469,10 @@ export async function provisionTree(
  */
 export function missingDeps(treeDir: string): string[] {
   const manifest = readManifest(treeDir)
-  const candidates = [...(manifest?.declared ?? [])]
+  const candidates: string[] = []
+  for (const name of manifest?.declared ?? []) {
+    if (isValidPackageName(name) && !candidates.includes(name)) candidates.push(name)
+  }
   const entryFile = findEntryFile(treeDir)
   if (entryFile !== null) {
     for (const spec of staticBareImports(entryFile)) {

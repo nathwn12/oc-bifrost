@@ -144,11 +144,6 @@ function tokenize(text: string, path: string): Tok[] {
   return toks
 }
 
-function skipWs(toks: Tok[], i: number): number {
-  while (i < toks.length && toks[i]!.kind === "ws") i++
-  return i
-}
-
 function skipWsAndComments(toks: Tok[], i: number): number {
   while (i < toks.length && (toks[i]!.kind === "ws" || toks[i]!.kind === "comment")) i++
   return i

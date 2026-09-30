@@ -664,17 +664,6 @@ function readMarker(treeDir: string): ProvisionMarker | null {
   return { version: 1, deps: deps as string[], actions: actions as ProvisionAction[] }
 }
 
-/** True when `p` is a REAL directory (never a reparse point) - lstat, never follows. */
-function isRealDirectory(p: string): boolean {
-  let stats: fs.Stats
-  try {
-    stats = fs.lstatSync(p)
-  } catch {
-    return false
-  }
-  return !stats.isSymbolicLink() && stats.isDirectory()
-}
-
 /** True when `p` is a link (junction on Windows, symlink elsewhere). */
 function isLink(p: string): boolean {
   try {

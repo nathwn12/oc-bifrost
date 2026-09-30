@@ -30,6 +30,7 @@ import {
   type GithubResolveResult,
   type GithubSpec,
 } from "./github.js"
+import { wireTui } from "./wire-tui.js"
 import type { BifrostOptions, OCContext, PluginEntry } from "./types.js"
 
 export { COMPAT_MATRIX, matrixRow } from "./compat-matrix.js"
@@ -53,6 +54,17 @@ export function githubCacheRoot(
 ): string {
   const cacheHome = env.XDG_CACHE_HOME || path.join(homeDirectory, ".cache")
   return path.join(cacheHome, "opencode", "oc-bifrost", "github")
+}
+
+/**
+ * Whether opt-in TUI wiring is enabled. An explicit option wins; otherwise
+ * `OC_BIFROST_WIRE_TUI` opts in with exactly `"1"` or `"true"`
+ * (case-insensitive); any other value is off. Pure, exported for tests.
+ */
+export function wireTuiEnabled(option: boolean | undefined, env: NodeJS.ProcessEnv = process.env): boolean {
+  if (option !== undefined) return option
+  const raw = String(env?.OC_BIFROST_WIRE_TUI ?? "").trim().toLowerCase()
+  return raw === "1" || raw === "true"
 }
 
 /**
@@ -199,6 +211,8 @@ export default Plugin.define({
       let presetNote: string | undefined
       let bundle: Preset | undefined
       let githubNote: string | undefined
+      // Hoisted so the post-mount wiring step can read the resolve result.
+      let gh: GithubResolveResult | undefined
       if (resolved.kind === "preset") {
         bundle = PRESETS[resolved.id] as Preset
         const check: PrerequisiteCheck = await checkPrerequisite(bundle)
@@ -217,7 +231,6 @@ export default Plugin.define({
         // OC_BIFROST_TRUST=github env); a warm, hash-verified cache loads
         // with zero network and no re-consent. The cache is user-level, not
         // tied to the project that happens to load the plugin.
-        let gh: GithubResolveResult
         try {
           gh = await resolveGithubPlugin(resolved.spec, {
             cacheRoot: githubCacheRoot(),
@@ -305,6 +318,39 @@ export default Plugin.define({
             // checkFreshness never rejects by contract; belt and braces.
           },
         )
+      }
+
+      // Opt-in TUI wiring - AFTER the mount succeeded, and only for a github:
+      // SNAPSHOT (the single-file fallback has no materialized tree to wire).
+      // The cli.json path is CALLER-computed: the `cliJsonPath` option
+      // overrides the default `~/.config/opencode/cli.json`, and wire-tui.ts
+      // never guesses it. Whether a wrapper is needed is wire-tui's own
+      // condition - not duplicated here. A wire failure or refusal is a loud
+      // row (never silent, never swallowed) and can never abort the mount
+      // itself: the plugin already mounted.
+      if (
+        mounted &&
+        resolved.kind === "github" &&
+        gh !== undefined &&
+        gh.meta.layout === "snapshot" &&
+        wireTuiEnabled(options.wireTui, process.env)
+      ) {
+        // github.ts layout contract: the materialized snapshot tree lives at
+        // `<cacheDir>/tree` (a stable, documented constant of that module).
+        const treeDir = path.join(gh.cacheDir, "tree")
+        const cliJsonPath = options.cliJsonPath ?? path.join(os.homedir(), ".config", "opencode", "cli.json")
+        try {
+          const wired = await wireTui(treeDir, cliJsonPath)
+          reporter.record(
+            `wire:${resolved.spec.owner}/${resolved.spec.repo}`,
+            "mounted",
+            `TUI entry ${wired.entry} wired into ${cliJsonPath}`,
+          )
+        } catch (error) {
+          reporter.warn(
+            `could not wire the TUI entry for "${entry.spec}" into ${cliJsonPath}: ${(error as Error).message}`,
+          )
+        }
       }
 
       if (options.verbose !== false) {

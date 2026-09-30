@@ -415,7 +415,8 @@ export async function provisionTree(
     }
     const dest = safeDestination(treeDir, name)
     if (dest === null) {
-      // Unreachable after name validation; kept as a fail-closed guard.
+      // Fail-closed path-escape guard: the only thing refusing a "."/".." or
+      // absolute name here - `isValidPackageName` above does NOT exclude them.
       report.refused.push(sanitizeName(name))
       continue
     }

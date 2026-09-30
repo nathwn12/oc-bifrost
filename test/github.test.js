@@ -508,6 +508,31 @@ test("resolveGithubPlugin: a missing ref defaults to the repo default branch (br
   }
 })
 
+test("resolveGithubPlugin: a full 40-hex ref needs NO resolution - zero API calls, the ref IS the commit", async () => {
+  const root = tmpRoot()
+  try {
+    const PINNED = "ABCDEF1234567890ABCDEF1234567890ABCDEF12"
+    const spec = { owner: "obra", repo: "superpowers", ref: PINNED }
+    // commitSha: null makes ANY API commit-resolution call fail with HTTP 404:
+    // the resolve must never reach the API surface at all.
+    const impl = fakeFetch({ commitSha: null, tree: TREE })
+    const result = await resolveGithubPlugin(spec, { cacheRoot: root, fetchImpl: impl, trusted: true })
+    assert.equal(result.meta.ref, PINNED)
+    assert.equal(result.meta.resolvedCommit, PINNED.toLowerCase(), "the pinned ref itself is the resolved commit, lowercased like the API path returns")
+    const apiCalls = impl.calls.filter((call) => call.url.startsWith("https://api.github.com/"))
+    assert.equal(apiCalls.length, 0, "a full 40-hex ref must never touch the API")
+    assert.equal(
+      impl.calls.some((call) => /\/repos\/[^/]+\/[^/]+$/.test(call.url)),
+      false,
+      "the default-branch lookup must be skipped for a pinned ref",
+    )
+    const tarballCall = impl.calls.find((call) => call.url.startsWith("https://codeload.github.com/"))
+    assert.match(tarballCall.url, new RegExp(`/tar\\.gz/${PINNED.toLowerCase()}$`), "the snapshot is fetched by the pinned commit")
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true })
+  }
+})
+
 /* ---- the loud single-file fallback ---- */
 
 test("resolveGithubPlugin: a snapshot lacking every candidate falls back to single-file, named in meta", async () => {

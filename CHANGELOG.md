@@ -1,5 +1,21 @@
 # Changelog
 
+## 1.3.2 (2026-09-30)
+
+### Changed
+
+- **A fully-pinned 40-hex `github:` ref resolves with zero GitHub API calls**
+  (`src/github.ts`). Such a ref already IS the commit identity the resolution call
+  would only echo back, so `resolveCommit` short-circuits on it before any API
+  surface is reached - fully-pinned specs now mount even on hosts where the
+  unauthenticated REST API is refused. `test/github.test.js` pins the behaviour:
+  a 40-hex ref with the API forced to 404 still mounts, makes zero API calls,
+  skips the default-branch lookup, and fetches the snapshot by the pinned commit.
+
+### Checks
+
+- `npm run check` green (197/197).
+
 ## 1.3.1 (2026-09-29)
 
 ### Changed

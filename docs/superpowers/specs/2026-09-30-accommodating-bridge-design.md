@@ -105,8 +105,17 @@
 
 - **The seven refused hooks** - config, auth, provider, command.execute.before, experimental.provider.small_model, experimental.compaction.autocontinue, experimental.text.complete (`src/hooks.ts:355-363`; matrix rows `src/compat-matrix.ts:128-168`).
 - **Facade refusals** - `client.tui.showToast`, `client.session.children` (`src/context.ts:41-54`; matrix rows 92-102).
-- **TUI/CLI-plugin mounting via the server bridge** - documented boundary: `packages/core/src/plugin/module.ts` loads server entrypoints; the TUI plugin context is a separate process surface; **a server bridge cannot render `ui.slot` sidebars**. Anything needing a TUI-process surface stays out.
+- **TUI/CLI-plugin mounting via the server bridge** - documented boundary: `packages/core/src/plugin/module.ts` loads server entrypoints; the TUI plugin context is a separate process surface; **a server bridge cannot mount a TUI entry / render `ui.slot` sidebars**. Anything needing a TUI-process surface stays out. The proven wiring below circumscribes this boundary; it does not cross it.
 - **The discovery shape pass** - closed in 1.3.1 (`src/discover.ts:66-70`); no redesign.
+
+### TUI-side wiring mechanics (proven 2026-09-30)
+
+> Amendment record: recorded from the flight-deck sidebar challenge (wire `oc-flight-deck`'s sidebar from a `github:`-fetched snapshot); proven live 2026-09-30, with the VERIFIED-PLUGINS.md row, at commit `3aa7c3d`. The 1.4.x TUI-wiring phase is designed from these facts, not from static analysis.
+
+- **Bun's specifier-rewrite remap is NOT reliable for external directory entries.** Static analysis suggested `@opencode/plugin/tui`, `@opentui/core`, `@opentui/solid`, `solid-js` all remap to host modules for non-node_modules files. In practice the 2.0.20 TUI (Bun binary) loaded a `file:` directory entry into `src/tui` but failed with `Cannot find package '@opentui/core'` regardless of a tree-local node_modules junction - the loader's native resolution path did not honor the tree's node_modules for the TUI-side load. Physical provisioning is required.
+- **The proven wiring (live, mounted, zero plugin-operation failures): the npm-cache package layout is the reliable resolution mechanism.** The `oc-flight-deck@0.8.1` npm cache package dir was replaced by a junction to the materialized snapshot tree (which carries package.json + src/ + a provisioned node_modules junction to the npm peer generation: `@opencode/plugin` 2.0.19, `@opentui/core` 0.5.12, `@opentui/solid` 0.5.12, `solid-js` 1.9.15 + transitives). The TUI inventory (`features.tui`) + npm resolver then load the `./tui` entrypoint from the tree with all peers physically resolvable; the server-side mount also flipped from refused to `mounted v2:flight-deck.host` (the tree's node_modules provisioned `@opencode/plugin` for the stub too).
+- **Companion mechanism for the Phase 1/2 work, not a server-bridge escape:** the npm-layout junction makes a `github:`-fetched snapshot look like a cached npm package the TUI resolver already knows how to load - the TUI-side counterpart of Phase 1's junction provisioning (§3) and of Phase 2's `npm:`/bare-name sources (§4). VERIFIED-PLUGINS.md documents the row: as-fetched refused (`Cannot find package '@opencode/plugin'`), provisioned server pass-through mounted, TUI panel from the same snapshot tree via the npm-layout junction.
+- **Boundary (unchanged):** the server bridge still cannot mount a TUI entry; the panel renders through the TUI's **own** npm resolver pointed at the same verified snapshot tree. The core boundary (`packages/core/src/plugin/module.ts:98` vs `packages/tui/src/plugin/context.tsx:670`) stands.
 
 ## 7. Risks & open questions
 

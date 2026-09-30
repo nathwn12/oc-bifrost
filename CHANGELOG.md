@@ -1,5 +1,32 @@
 # Changelog
 
+## 1.3.3 (2026-09-30)
+
+### Changed
+
+- **Per-spec in-flight serialization closes the shared-cache first-fetch race
+  under multi-location loads** (`src/github.ts`). When the host activates the
+  same configured package from several locations at once, two concurrent
+  `resolveGithubPlugin` passes for the same `github:` spec used to race the
+  same cache entry: pass B could land mid-materialization, see `tree` without
+  a provenance record, fire the "never overwrite an incomplete cache"
+  refusal, and its rollback then removed the partial state pass A was still
+  writing - so every reload re-fetched and the mount never completed. A
+  module-level in-flight map keyed by the derived cache directory now makes
+  the second pass await the SAME fetch/materialize promise; a settled fetch
+  (fulfilled or failed) clears the entry, so a warm cache still loads with
+  zero network and a failed fetch is retried exactly as before.
+  `test/github.test.js` pins the behaviour -
+  `resolveGithubPlugin: CONCURRENT first fetches for the same spec share ONE
+  codeload fetch (no race on the shared cache)`: two concurrent calls with a
+  deliberately delayed tarball response both resolve, make exactly ONE
+  codeload fetch, write provenance once, and the next load is a zero-network
+  verified hit.
+
+### Checks
+
+- `npm run check` green (198/198).
+
 ## 1.3.2 (2026-09-30)
 
 ### Changed

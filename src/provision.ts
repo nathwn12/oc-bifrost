@@ -16,11 +16,20 @@
  *      and (b) the per-package-rooted OpenCode npm cache layout
  *      `<store>/<name>@<version>/<cacheId>/node_modules/<name>` (scoped
  *      packages nest under `<store>/@scope/...`), preferring the NEWEST
- *      version. A source candidate is only used when `lstat` reports a REAL
- *      directory - an existing reparse point is never followed while resolving
- *      a source.
+ *      version. Each versioned directory is a package's own install root, so
+ *      the lookup scans the `node_modules` of EVERY such root - a hoisted
+ *      dependency of another package is resolved too, not only one whose own
+ *      root is named for it. A source candidate is only used when `lstat`
+ *      reports a REAL directory - an existing reparse point is never followed
+ *      while resolving a source.
  *   2. NPM FALLBACK. Dependencies with no host-store hit are installed with
- *      `npm install --no-save --prefix <tree>` when `opts.npm` is true. npm is
+ *      `npm install --no-save --legacy-peer-deps --prefix <tree>` when
+ *      `opts.npm` is true. The installed project declares its OWN peers as
+ *      required (not optional), so a strict install of a real plugin tree
+ *      fails ERESOLVE on a peer range the tree does not itself pin (the live
+ *      oc-flight-deck tree: `solid-js@1.9.15` vs `@opentui/solid@0.5.12`'s
+ *      exact `peer solid-js@1.9.12`); `--legacy-peer-deps` is npm's own
+ *      documented remedy and lets the tree's own pins win. npm is
  *      SPAWNED, never imported (`"dependencies": {}` holds). On Windows the
  *      spawn goes through `cmd.exe /d /c npm.cmd` (Node does not resolve
  *      `.cmd` via PATHEXT without a shell, and `shell: true` is never used);
@@ -275,10 +284,12 @@ function resolvableInTree(treeDir: string, spec: string): boolean {
   return fs.existsSync(path.join(treeDir, "node_modules", root))
 }
 
-function parseScope(name: string): string | undefined {
-  if (!name.startsWith("@")) return undefined
-  const slash = name.indexOf("/")
-  return slash === -1 ? undefined : name.slice(0, slash)
+/** A per-package install root inside a host store: `<name>@<version>`. */
+interface NpmCacheOwner {
+  /** The `<store>/<name>@<version>` (scoped: `<store>/@scope/<name>@<version>`) directory. */
+  root: string
+  /** The `<version>` segment of the directory name. */
+  version: string
 }
 
 function resolveFromHostStores(stores: readonly string[], name: string): string | null {
@@ -296,33 +307,63 @@ function resolveFromStore(store: string, name: string): string | null {
   return resolveFromNpmCache(store, name)
 }
 
-function resolveFromNpmCache(store: string, name: string): string | null {
-  const scope = parseScope(name)
-  const basename = scope !== undefined ? name.slice(scope.length + 1) : name
-  const parent = scope !== undefined ? path.join(store, scope) : store
+/**
+ * Every per-package install root at a store's top level: `<store>/<name>@<version>`
+ * and the scoped shape `<store>/@scope/<name>@<version>`. The OpenCode npm cache
+ * installs a package AND its hoisted dependency graph under one such versioned
+ * directory, so a dependency can live in the `node_modules` of ANY installed
+ * package - not only one named after it (the live flight-deck peers sit under
+ * `<store>/oc-flight-deck@0.9.0/<cacheId>/node_modules/...`). Newest version
+ * first; alias versions (`@latest`) sort after numeric ones.
+ */
+function npmCacheOwners(store: string): NpmCacheOwner[] {
+  const owners: NpmCacheOwner[] = []
+  const consider = (root: string, dirName: string): void => {
+    const at = dirName.indexOf("@")
+    if (at <= 0) return // a scope directory itself, or a name carrying no version
+    owners.push({ root, version: dirName.slice(at + 1) })
+  }
   let entries: fs.Dirent[]
   try {
-    entries = fs.readdirSync(parent, { withFileTypes: true })
+    entries = fs.readdirSync(store, { withFileTypes: true })
   } catch {
-    return null
+    return owners
   }
-  const prefix = `${basename}@`
-  const versionDirs = entries
-    .filter(
-      (e) =>
-        e.isDirectory() &&
-        e.name.startsWith(prefix) &&
-        e.name.length > prefix.length &&
-        isNumericVersion(versionOf(e.name)),
-    )
-    .map((e) => e.name)
-  versionDirs.sort((a, b) => compareVersionDirNamesDesc(a, b))
-  for (const versionDir of versionDirs) {
-    const versionPath = path.join(parent, versionDir)
-    if (!isRealDirectory(versionPath)) continue
+  for (const entry of entries) {
+    if (!entry.isDirectory()) continue
+    const entryPath = path.join(store, entry.name)
+    if (entry.name.startsWith("@")) {
+      let children: fs.Dirent[]
+      try {
+        children = fs.readdirSync(entryPath, { withFileTypes: true })
+      } catch {
+        continue
+      }
+      for (const child of children) {
+        if (child.isDirectory()) consider(path.join(entryPath, child.name), child.name)
+      }
+    } else {
+      consider(entryPath, entry.name)
+    }
+  }
+  return owners.sort(compareOwnersDesc)
+}
+
+function compareOwnersDesc(a: NpmCacheOwner, b: NpmCacheOwner): number {
+  const aNumeric = isNumericVersion(a.version)
+  const bNumeric = isNumericVersion(b.version)
+  if (aNumeric && bNumeric) return compareVersionsDesc(a.version, b.version)
+  if (aNumeric !== bNumeric) return aNumeric ? -1 : 1
+  if (a.version === b.version) return 0
+  return a.version < b.version ? -1 : 1
+}
+
+function resolveFromNpmCache(store: string, name: string): string | null {
+  const segments = name.split("/")
+  for (const owner of npmCacheOwners(store)) {
     let cacheIds: fs.Dirent[]
     try {
-      cacheIds = fs.readdirSync(versionPath, { withFileTypes: true })
+      cacheIds = fs.readdirSync(owner.root, { withFileTypes: true })
     } catch {
       continue
     }
@@ -330,25 +371,16 @@ function resolveFromNpmCache(store: string, name: string): string | null {
       if (!cacheId.isDirectory()) continue
       // Scoped packages keep their scope segment under node_modules:
       // `node_modules/@scope/<name>`, never `node_modules/<name>`.
-      const candidate = path.join(versionPath, cacheId.name, "node_modules", ...name.split("/"))
+      const candidate = path.join(owner.root, cacheId.name, "node_modules", ...segments)
       if (isRealDirectory(candidate)) return candidate
     }
   }
   return null
 }
 
-function versionOf(dirName: string): string {
-  const at = dirName.indexOf("@")
-  return at === -1 ? "" : dirName.slice(at + 1)
-}
-
 /** A version dir is a real version (not an `@latest`/`@next` alias) when it starts with a digit. */
 function isNumericVersion(version: string): boolean {
   return /^[0-9]/.test(version)
-}
-
-function compareVersionDirNamesDesc(a: string, b: string): number {
-  return compareVersionsDesc(versionOf(a), versionOf(b))
 }
 
 /** Descending version order: numeric dot-segments, then string, deterministic. */
@@ -386,9 +418,9 @@ function linkIntoTree(source: string, dest: string): boolean {
   }
 }
 
-/** Run `npm install --no-save --prefix <treeDir>`; true when it exits 0. */
+/** Run `npm install --no-save --legacy-peer-deps --prefix <treeDir>`; true when it exits 0. */
 function runNpmInstall(treeDir: string): boolean {
-  const args = ["install", "--no-save", "--prefix", treeDir]
+  const args = ["install", "--no-save", "--legacy-peer-deps", "--prefix", treeDir]
   const result =
     process.platform === "win32"
       ? spawnSync(process.env.ComSpec ?? "cmd.exe", ["/d", "/c", "npm.cmd", ...args], {

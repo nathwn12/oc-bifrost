@@ -14,13 +14,15 @@ import { missingDeps, provisionTree } from "../dist/provision.js"
  *     into <tree>/node_modules/<name> as a junction (Windows) / symlink
  *     (elsewhere); dryRun records the action but writes nothing
  *   - npm fallback: deps with no host-store hit are installed with
- *     `npm install --no-save --prefix <tree>` when opts.npm is true; a
- *     failing install refuses the package (report semantics - never thrown)
+ *     `npm install --no-save --legacy-peer-deps --prefix <tree>` when opts.npm
+ *     is true; a failing install refuses the package (report semantics -
+ *     never thrown)
  *   - idempotence: an already-present node_modules entry records "skip"
  *   - no manifest: returns { actions: [], refused: [] } silently
  *   - OpenCode npm-cache layout: scoped/unscoped deps resolve from
- *     <store>/<name>@<version>/<cacheId>/node_modules/<name>, newest version
- *     preferred
+ *     `<store>/<name>@<version>/<cacheId>/node_modules/<name>`, newest version
+ *     preferred - including a dep hoisted into ANOTHER package's versioned
+ *     install root (the live flight-deck peers)
  *
  * All offline: the npm surface is a fake executable on PATH; host stores and
  * trees live in tmp dirs.
@@ -202,6 +204,68 @@ test("provisionTree: resolves an UNscoped dep from the OpenCode npm-cache layout
   }
 })
 
+test("provisionTree: resolves a dep HOISTED inside another package's npm-cache install root (the live layout)", async () => {
+  const root = tmpRoot()
+  try {
+    const tree = path.join(root, "tree")
+    writeTree(tree, {
+      packageJson: {
+        name: "fixture",
+        version: "1.0.0",
+        dependencies: { "@opencode/plugin": "2.0.19" },
+        peerDependencies: { "solid-js": ">=1.9.0" },
+      },
+    })
+    const store = path.join(root, "store")
+    // The live OpenCode npm cache: a package's own versioned install root
+    // carries its hoisted dependency graph. The peers have NO root of their
+    // own (`<store>/@opencode/plugin@...` does not exist) - they live only under
+    // the install root of the package that depends on them.
+    const scoped = writePackage(store, "oc-flight-deck@0.9.0/1790770553595/node_modules/@opencode/plugin", {
+      "package.json": JSON.stringify({ name: "@opencode/plugin", version: "2.0.19" }),
+      "index.js": "export default 1\n",
+    })
+    const unscoped = writePackage(store, "oc-flight-deck@0.9.0/1790770553595/node_modules/solid-js", {
+      "package.json": JSON.stringify({ name: "solid-js", version: "1.9.15" }),
+      "index.js": "export default 1\n",
+    })
+
+    const report = await provisionTree(tree, { hostStores: [store] })
+
+    assert.deepEqual(report.actions, [
+      { package: "@opencode/plugin", source: "host", target: scoped },
+      { package: "solid-js", source: "host", target: unscoped },
+    ])
+    assert.deepEqual(report.refused, [])
+    assert.equal(fs.lstatSync(path.join(tree, "node_modules", "@opencode", "plugin")).isSymbolicLink(), true)
+    assert.equal(
+      fs.readFileSync(path.join(tree, "node_modules", "solid-js", "package.json"), "utf8"),
+      JSON.stringify({ name: "solid-js", version: "1.9.15" }),
+    )
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true })
+  }
+})
+
+test("provisionTree: resolves a dep from a SCOPED package's npm-cache install root", async () => {
+  const root = tmpRoot()
+  try {
+    const tree = path.join(root, "tree")
+    writeTree(tree, { packageJson: { name: "fixture", version: "1.0.0", dependencies: { "@opentui/core": "0.5.12" } } })
+    const store = path.join(root, "store")
+    const source = writePackage(store, "@scope/host@1.2.0/abc/node_modules/@opentui/core", {
+      "package.json": JSON.stringify({ name: "@opentui/core", version: "0.5.12" }),
+    })
+
+    const report = await provisionTree(tree, { hostStores: [store] })
+
+    assert.deepEqual(report.actions, [{ package: "@opentui/core", source: "host", target: source }])
+    assert.deepEqual(report.refused, [])
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true })
+  }
+})
+
 test("provisionTree: an @latest alias dir does not beat a pinned numeric version", async () => {
   const root = tmpRoot()
   try {
@@ -314,7 +378,7 @@ test("provisionTree: npm fallback spawns `npm install --no-save --prefix <tree>`
     const report = await withPath(shimDir, () => provisionTree(tree, { npm: true }))
 
     assert.equal(fs.existsSync(marker), true, "the fake npm must have been invoked")
-    assert.equal(fs.readFileSync(argsFile, "utf8").trim(), `install --no-save --prefix ${tree}`)
+    assert.equal(fs.readFileSync(argsFile, "utf8").trim(), `install --no-save --legacy-peer-deps --prefix ${tree}`)
     assert.equal(report.actions.length, 1)
     assert.deepEqual(
       { package: report.actions[0].package, source: report.actions[0].source },

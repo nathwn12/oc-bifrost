@@ -139,8 +139,8 @@ test("provisionTree: resolves a scoped dep from the OpenCode npm-cache layout, p
     const tree = path.join(root, "tree")
     writeTree(tree, { packageJson: { name: "fixture", version: "1.0.0", dependencies: { "@scope/peer": "1.0.0" } } })
     const store = path.join(root, "store")
-    writePackage(store, "@scope/peer@1.0.0/111/node_modules/peer", { "package.json": JSON.stringify({ name: "@scope/peer", version: "1.0.0" }) })
-    const newest = writePackage(store, "@scope/peer@2.0.0/222/node_modules/peer", { "package.json": JSON.stringify({ name: "@scope/peer", version: "2.0.0" }) })
+    writePackage(store, "@scope/peer@1.0.0/111/node_modules/@scope/peer", { "package.json": JSON.stringify({ name: "@scope/peer", version: "1.0.0" }) })
+    const newest = writePackage(store, "@scope/peer@2.0.0/222/node_modules/@scope/peer", { "package.json": JSON.stringify({ name: "@scope/peer", version: "2.0.0" }) })
 
     const report = await provisionTree(tree, { hostStores: [store] })
 
@@ -150,6 +150,90 @@ test("provisionTree: resolves a scoped dep from the OpenCode npm-cache layout, p
       JSON.stringify({ name: "@scope/peer", version: "2.0.0" }),
       "the junction must point at the newest version",
     )
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true })
+  }
+})
+
+test("provisionTree: resolves an UNscoped dep from the OpenCode npm-cache layout", async () => {
+  const root = tmpRoot()
+  try {
+    const tree = path.join(root, "tree")
+    writeTree(tree, { packageJson: { name: "fixture", version: "1.0.0", dependencies: { "left-pad": "1.0.0" } } })
+    const store = path.join(root, "store")
+    const source = writePackage(store, "left-pad@1.0.0/111/node_modules/left-pad", { "package.json": JSON.stringify({ name: "left-pad", version: "1.0.0" }) })
+
+    const report = await provisionTree(tree, { hostStores: [store] })
+
+    assert.deepEqual(report.actions, [{ package: "left-pad", source: "host", target: source }])
+    assert.equal(
+      fs.readFileSync(path.join(tree, "node_modules", "left-pad", "package.json"), "utf8"),
+      JSON.stringify({ name: "left-pad", version: "1.0.0" }),
+    )
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true })
+  }
+})
+
+test("provisionTree: an @latest alias dir does not beat a pinned numeric version", async () => {
+  const root = tmpRoot()
+  try {
+    const tree = path.join(root, "tree")
+    writeTree(tree, { packageJson: { name: "fixture", version: "1.0.0", dependencies: { "left-pad": "1.0.0" } } })
+    const store = path.join(root, "store")
+    writePackage(store, "left-pad@latest/999/node_modules/left-pad", { "package.json": JSON.stringify({ name: "left-pad", version: "9.9.9" }) })
+    const pinned = writePackage(store, "left-pad@1.0.0/111/node_modules/left-pad", { "package.json": JSON.stringify({ name: "left-pad", version: "1.0.0" }) })
+
+    const report = await provisionTree(tree, { hostStores: [store] })
+
+    assert.deepEqual(report.actions, [{ package: "left-pad", source: "host", target: pinned }])
+    assert.equal(
+      fs.readFileSync(path.join(tree, "node_modules", "left-pad", "package.json"), "utf8"),
+      JSON.stringify({ name: "left-pad", version: "1.0.0" }),
+      "the numeric pinned version must win over the stale @latest alias",
+    )
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true })
+  }
+})
+
+test("provisionTree: a hostile dep name (traversal) is refused and writes nothing outside node_modules", async () => {
+  const root = tmpRoot()
+  try {
+    const tree = path.join(root, "tree")
+    writeTree(tree, {
+      packageJson: { name: "fixture", version: "1.0.0", dependencies: { "..": "1.0.0", "../../victim": "1.0.0" } },
+    })
+    const store = path.join(root, "store")
+    writePackage(store, "node_modules/victim", { "package.json": JSON.stringify({ name: "victim", version: "1.0.0" }) })
+
+    const report = await provisionTree(tree, { hostStores: [store] })
+
+    assert.deepEqual(report.actions, [])
+    assert.deepEqual(report.refused, ["..", "../../victim"])
+    assert.equal(fs.existsSync(path.join(tree, "node_modules")), false, "no node_modules may be created for a hostile name")
+    assert.equal(fs.existsSync(path.join(root, "victim")), false, "nothing may be written outside the tree's node_modules")
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true })
+  }
+})
+
+test("provisionTree: a host-store link failure refuses the package without throwing", async () => {
+  const root = tmpRoot()
+  try {
+    const tree = path.join(root, "tree")
+    writeTree(tree, { packageJson: { name: "fixture", version: "1.0.0", dependencies: { "left-pad": "1.0.0" } } })
+    const store = path.join(root, "store")
+    writePackage(store, "node_modules/left-pad", { "package.json": JSON.stringify({ name: "left-pad", version: "1.0.0" }) })
+    // Sabotage the destination: plant a regular FILE where `node_modules` must
+    // be created, so the mkdir step in the link throws.
+    fs.writeFileSync(path.join(tree, "node_modules"), "not a directory")
+
+    const report = await provisionTree(tree, { hostStores: [store] })
+
+    assert.deepEqual(report.actions, [])
+    assert.deepEqual(report.refused, ["left-pad"])
+    assert.equal(fs.existsSync(path.join(tree, "left-pad")), false, "nothing may be written outside node_modules")
   } finally {
     fs.rmSync(root, { recursive: true, force: true })
   }

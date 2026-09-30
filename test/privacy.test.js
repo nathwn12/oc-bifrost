@@ -27,7 +27,8 @@ const FORBIDDEN = [
   /Q:[\\/]PROJECTS/i, // a personal project root
 ]
 
-const SKIP_DIRS = new Set(["node_modules", ".git", "dist", ".vscode"])
+// gitignored SDD scratch (ledger/briefs/reports) - never shipped, like .vscode
+const SKIP_DIRS = new Set(["node_modules", ".git", "dist", ".vscode", ".superpowers"])
 const SKIP_FILES = new Set(["package-lock.json"])
 const TEXT = new Set([".md", ".json", ".jsonc", ".ts", ".js", ".mjs", ".cjs", ".yml", ".yaml", ".txt"])
 

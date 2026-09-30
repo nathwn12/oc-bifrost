@@ -1,5 +1,11 @@
 # Changelog
 
+## 1.4.0 (2026-09-30)
+
+- Provision fetched GitHub snapshots from the OpenCode host npm store via junction, with consent-gated npm fallback and loud refusals.
+- Add opt-in TUI wiring for fetched GitHub snapshots.
+- Add tests: `resolveGithubPlugin: cold fetch provisions the tree's declared deps from the host store and the entry now imports`; `wireTui: true wires a mounted github: snapshot into the caller-provided cli.json`.
+
 ## 1.3.3 (2026-09-30)
 
 ### Changed

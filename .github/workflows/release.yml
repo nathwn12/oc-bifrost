@@ -1,0 +1,27 @@
+# Publish unattended via npm OIDC trusted publishing: no NPM_TOKEN, provenance is automatic.
+# One-time setup on npmjs.com - package Settings -> Trusted Publisher -> GitHub Actions,
+# user `nathwn12`, repo `oc-bifrost`, workflow filename `release.yml`, action `npm publish`.
+# npm's ~5-15 min publish-time malware scan still applies, so the version is installable
+# minutes after a green run.
+name: release
+
+on:
+  push:
+    tags: [v*]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  id-token: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          registry-url: https://registry.npmjs.org
+      - run: npm ci
+      - run: npm publish --access public

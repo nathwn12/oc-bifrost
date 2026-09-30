@@ -378,6 +378,32 @@ test("unwireTui: removes only our entry from a user-owned plugins array, restori
   }
 })
 
+test("unwireTui: two wired trees in one user-owned plugins array coalesce into a byte-exact restore (regression)", async () => {
+  const root = tmpRoot()
+  try {
+    const treeA = path.join(root, "tree-a")
+    const treeB = path.join(root, "tree-b")
+    fs.mkdirSync(treeA, { recursive: true })
+    fs.mkdirSync(treeB, { recursive: true })
+    const before = '{\n  "plugins": ["keep-me", "keep-me-2"]\n}\n'
+    const cli = writeCli(root, before)
+    await wireTui(treeA, cli)
+    await wireTui(treeB, cli)
+    const wired = fs.readFileSync(cli, "utf8")
+    assert.ok(wired.includes(pathToFileURL(treeA).href), "tree A entry must be wired")
+    assert.ok(wired.includes(pathToFileURL(treeB).href), "tree B entry must be wired")
+    assert.equal(wired.split(ENTRY_MARKER).length - 1, 2, "both owned entries must carry their marker")
+    assert.equal(await unwireTui(cli), true)
+    assert.equal(
+      fs.readFileSync(cli, "utf8"),
+      before,
+      "two owned entries must unwire to the exact original bytes - overlapping spans must coalesce, not corrupt",
+    )
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true })
+  }
+})
+
 test("unwireTui: keeps user entries that were added after we created the key", async () => {
   const root = tmpRoot()
   try {

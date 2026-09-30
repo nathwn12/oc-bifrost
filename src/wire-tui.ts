@@ -428,10 +428,25 @@ function unmergePlugins(text: string, path: string): string | null {
     return text.slice(0, nl) + text.slice(end)
   }
 
-  spans.sort((a, b) => b[0] - a[0])
-  let out = text
-  for (const [a, b] of spans) out = out.slice(0, a) + out.slice(b)
-  return out
+  // Adjacent owned entries produce overlapping spans (the separator comma is
+  // claimed by both neighbours). Coalesce before slicing: each span's offsets
+  // are relative to the ORIGINAL text, so applying an overlapping span after
+  // an earlier cut would silently shift and corrupt the file - merging first
+  // keeps every cut offset-safe.
+  spans.sort((a, b) => a[0] - b[0])
+  const merged: Array<[number, number]> = []
+  for (const span of spans) {
+    const last = merged[merged.length - 1]
+    if (last && span[0] <= last[1]) last[1] = Math.max(last[1], span[1])
+    else merged.push([span[0], span[1]])
+  }
+  let out = ""
+  let cursor = 0
+  for (const [a, b] of merged) {
+    out += text.slice(cursor, a)
+    cursor = b
+  }
+  return out + text.slice(cursor)
 }
 
 /**

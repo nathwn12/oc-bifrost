@@ -200,7 +200,7 @@ export interface GithubResolveOptions {
 }
 
 export interface GithubResolveResult {
-  /** `file://` URL of the verified cached entry module - the import target. */
+  /** `file://` URL of the verified cached entry module — the import target. */
   url: string
   cacheDir: string
   meta: GithubMeta
@@ -210,7 +210,7 @@ export interface GithubResolveResult {
   warnings?: string[]
   /**
    * Provision rows for the mount note (`provision <pkg> - host:<path>`,
-   * `... npm install --no-save`, `provision refused <pkg> - <reason>`,
+   * `npm install --no-save` - one per npm run, `provision refused <pkg> - <reason>`,
    * `provision skipped: no package.json`). Present only when provisioning
    * actually ran this cycle (a first fetch, or a warm re-provision on marker
    * drift/staleness) and is not `"off"`.
@@ -265,6 +265,16 @@ const GITHUB_SPEC_PATTERN =
  * like today.
  */
 const inflightFetches = new Map<string, Promise<GithubResolveResult>>()
+/**
+ * The warm-path counterpart of `inflightFetches`: the warm load WRITES when a
+ * provisioned tree drifted or went stale (junctions and the marker), so two
+ * concurrent warm loads of the same cache entry must share one verify pass -
+ * otherwise a racing `linkIntoTree` EEXIST rows "provision refused" for a dep
+ * the other caller provisioned (and, under strict, aborts setup for nothing).
+ * Keyed on `cacheDir`, mirroring the cold-path pattern; a settled promise
+ * removes its own entry.
+ */
+const inflightWarm = new Map<string, Promise<GithubResolveResult>>()
 
 const GITHUB_PLUGIN_FILENAME = "plugin.ts"
 const META_FILENAME = "meta.json"
@@ -690,20 +700,66 @@ function removeLink(p: string): boolean {
   }
 }
 
-/** Write the marker only when a provision actually took actions. */
-function writeMarker(treeDir: string, report: ProvisionReport): void {
+/**
+ * The tree-local destination of a marker action: `<tree>/node_modules/<name>`.
+ * Null when the marker name escapes that root (a hostile marker is refused
+ * out loud, never followed - the marker is a derived-layer record, untrusted).
+ */
+function markerDestination(treeDir: string, action: ProvisionAction): string | null {
+  const dest = path.join(treeDir, "node_modules", ...action.package.split("/"))
+  const rel = path.relative(path.join(treeDir, "node_modules"), dest)
+  if (rel === "" || rel.startsWith("..") || path.isAbsolute(rel)) return null
+  return dest
+}
+
+/** Canonical realpath, case-folded on Windows; null when the path does not exist. */
+function canonicalRealpath(p: string): string | null {
+  try {
+    const real = fs.realpathSync(p)
+    return process.platform === "win32" ? real.toLowerCase() : real
+  } catch {
+    return null
+  }
+}
+
+/**
+ * A marker action is coherent when its tree-local destination RESOLVES to the
+ * recorded target: `realpath(dest)` must exist and equal `realpath(target)`.
+ * This is spec §3's cheap realpath re-check - for `source: "host"` actions the
+ * marker records the STORE directory, so only the junction's own resolution
+ * can prove the tree can still reach it: a deleted or repointed junction whose
+ * store stays alive fails here and routes to the re-provision path.
+ */
+function markerActionCoherent(treeDir: string, action: ProvisionAction): boolean {
+  const dest = markerDestination(treeDir, action)
+  if (dest === null) return false
+  const destReal = canonicalRealpath(dest)
+  if (destReal === null) return false
+  const targetReal = canonicalRealpath(action.target)
+  return targetReal !== null && destReal === targetReal
+}
+
+/**
+ * Write the marker when a provision took actions. Creates the tree-local
+ * `node_modules` first: an `npm install` that exits 0 without creating it is
+ * a real possibility, and the marker must never destroy the fetch it records.
+ * A write failure DEGRADES to a loud row (returned, never thrown): the cache
+ * is complete and verified without the marker, and the next load simply
+ * re-verifies and can re-provision. Returns null on success, else the reason.
+ */
+function writeMarker(treeDir: string, report: ProvisionReport): string | null {
   const marker: ProvisionMarker = {
     version: 1,
     deps: report.actions.map((action) => action.package),
     actions: report.actions.map((action) => ({ package: action.package, source: action.source, target: action.target })),
   }
+  const markerFile = path.join(treeDir, "node_modules", PROVISION_MARKER_FILENAME)
   try {
-    atomicWrite(path.join(treeDir, "node_modules", PROVISION_MARKER_FILENAME), `${JSON.stringify(marker, null, 2)}\n`)
+    fs.mkdirSync(path.dirname(markerFile), { recursive: true })
+    atomicWrite(markerFile, `${JSON.stringify(marker, null, 2)}\n`)
+    return null
   } catch (error) {
-    fail(
-      `could not write the provision marker at ${safe(path.join(treeDir, "node_modules", PROVISION_MARKER_FILENAME))}: ` +
-        `${safe((error as Error).message, 200)}; node_modules is a derived layer - delete the cache directory to re-fetch`,
-    )
+    return `could not write the provision marker at ${safe(markerFile)}: ${safe((error as Error).message, 200)}`
   }
 }
 
@@ -722,9 +778,17 @@ function provisionRow(name: string, mode: ProvisionMode): string {
 /** The mount-report rows for one provision pass. */
 function provisionRows(report: ProvisionReport, mode: ProvisionMode): string[] {
   const rows: string[] = []
+  let npmRowEmitted = false
   for (const action of report.actions) {
     if (action.source === "host") rows.push(`provision ${action.package} - host:${safe(action.target)}`)
-    else if (action.source === "npm") rows.push(`provision ${action.package} - npm install --no-save`)
+    else if (action.source === "npm") {
+      // R-6: ONE row per npm install run, not one per package - emitted at the
+      // first npm action's position.
+      if (!npmRowEmitted) {
+        rows.push("npm install --no-save")
+        npmRowEmitted = true
+      }
+    }
     // "skip" is status quo, not an event: no row.
   }
   for (const name of report.refused) rows.push(provisionRow(name, mode))
@@ -734,12 +798,13 @@ function provisionRows(report: ProvisionReport, mode: ProvisionMode): string[] {
 /**
  * The warm-reload counterpart of provisioning (spec §3): the marker written at
  * provision time lets every load re-verify the derived layer CHEAPLY - a
- * per-target realpath re-check (a store that moves leaves its junctions stale)
- * and a declared-deps drift check. A coherent marker means zero work and zero
- * re-provisioning; drift, a stale target, or a missing marker re-provisions
- * (idempotent for what is present, zero network while host hits last) and
- * rewrites the marker. Anything still refused is a loud row - and, under
- * `strict`, a throw.
+ * per-action realpath re-check of each tree-local destination (a store that
+ * moves, or a junction that is deleted or repointed, leaves its resolution
+ * stale) and a declared-deps drift check. A coherent marker means zero work
+ * and zero re-provisioning; drift, a stale link, or a missing marker
+ * re-provisions (idempotent for what is present, zero network while host hits
+ * last) and rewrites the marker. Anything still refused is a loud row - and,
+ * under `strict`, a throw.
  */
 async function verifyProvisionedTree(treeDir: string, opts: GithubResolveOptions): Promise<string[]> {
   const mode = provisionMode(opts.provision, process.env)
@@ -751,9 +816,9 @@ async function verifyProvisionedTree(treeDir: string, opts: GithubResolveOptions
   if (marker !== null && !declared.some((dep) => !marker.deps.includes(dep))) {
     // The marker covers every declared dep: the cheap realpath re-check is
     // the whole re-verification. Coherent -> zero work, zero network.
-    if (!marker.actions.some((action) => !isRealDirectory(action.target))) return []
-    // At least one target went stale (a store moved, a package was removed):
-    // fall through and re-provision.
+    if (!marker.actions.some((action) => !markerActionCoherent(treeDir, action))) return []
+    // At least one tree-local link went stale (a store moved, a junction was
+    // deleted or repointed, a package was removed): fall through and re-provision.
   }
   // Remove every stale link the marker knows about BEFORE re-provisioning, so
   // provisionTree's presence check can never mistake a dead junction for a
@@ -762,13 +827,14 @@ async function verifyProvisionedTree(treeDir: string, opts: GithubResolveOptions
   // path is refused out loud, never followed.
   if (marker !== null) {
     for (const action of marker.actions) {
-      if (isRealDirectory(action.target)) continue
-      const dest = path.join(treeDir, "node_modules", ...action.package.split("/"))
-      const rel = path.relative(treeDir, dest)
-      if (rel === "" || rel.startsWith("..") || path.isAbsolute(rel)) {
-        rows.push(`provision refused ${safe(action.package)} - a stale junction target could not be identified safely`)
+      const dest = markerDestination(treeDir, action)
+      if (dest === null) {
+        rows.push(
+          `provision refused ${safe(action.package)} - a marker entry names a path outside the tree's node_modules`,
+        )
         continue
       }
+      if (markerActionCoherent(treeDir, action)) continue
       if (isLink(dest) && !removeLink(dest)) {
         rows.push(`provision refused ${safe(action.package)} - a stale junction could not be replaced (locked or write-protected)`)
       }
@@ -779,7 +845,10 @@ async function verifyProvisionedTree(treeDir: string, opts: GithubResolveOptions
     npm: mode === "npm",
   })
   rows.push(...provisionRows(report, mode))
-  if (report.actions.length > 0) writeMarker(treeDir, report)
+  if (report.actions.length > 0) {
+    const markerFailure = writeMarker(treeDir, report)
+    if (markerFailure !== null) rows.push(`provision refused - ${markerFailure}`)
+  }
   if (opts.strict === true && report.refused.length > 0) fail(provisionRow(report.refused[0] as string, mode))
   return rows
 }
@@ -988,8 +1057,25 @@ function entryFileFor(cacheDir: string, meta: GithubMeta): string {
   return pluginFile
 }
 
-/** Cache-hit path: verify identity, type, and bytes, then hand over the URL. */
+/**
+ * Cache-hit path: verify identity, type, and bytes, then hand over the URL.
+ * Serialized per cache entry (`inflightWarm`): a warm load WRITES when it
+ * re-provisions a drifted or stale tree (junctions + marker), so concurrent
+ * warm loads of the same entry share one pass instead of racing each other.
+ */
 async function loadVerified(spec: GithubSpec, cacheDir: string, opts: GithubResolveOptions): Promise<GithubResolveResult> {
+  const existing = inflightWarm.get(cacheDir)
+  if (existing !== undefined) return existing
+  const promise = loadVerifiedInner(spec, cacheDir, opts).finally(() => {
+    // The map holds at most one promise per key - the one this call created -
+    // so a settled load always clears its own entry (mirrors inflightFetches).
+    inflightWarm.delete(cacheDir)
+  })
+  inflightWarm.set(cacheDir, promise)
+  return promise
+}
+
+async function loadVerifiedInner(spec: GithubSpec, cacheDir: string, opts: GithubResolveOptions): Promise<GithubResolveResult> {
   const metaFile = path.join(cacheDir, META_FILENAME)
   checkCacheFile(metaFile, "provenance record")
   const meta = readProvenance(cacheDir)
@@ -1008,7 +1094,7 @@ async function loadVerified(spec: GithubSpec, cacheDir: string, opts: GithubReso
     fail(
       `refusing to load "${safe(githubLabel(spec))}": the cache at ${safe(cacheDir)} holds a provenance record ` +
         `but its entry file is unreadable (${safe((error as Error).message)}). ` +
-        `Delete the cache directory to re-fetch - a broken cache is never silently re-fetched`,
+        `Delete the cache directory to re-fetch — a broken cache is never silently re-fetched`,
     )
   }
   const actual = sha256BytesHex(cached)
@@ -1499,38 +1585,13 @@ async function fetchAndRecord(
     } else {
       atomicWrite(entryFile, singleContent)
     }
-    // PROVISIONING (spec §3): the fetched tree declared its dependencies in
-    // its manifest; junction them from the host stores (zero network) or, per
-    // the provision option, install with npm - BEFORE the entry's first
-    // import, with every outcome a loud mount-report row. Only fetched trees
-    // are provisioned; local and preset entries never reach this path.
-    if (provisionModeValue !== "off") {
-      if (meta.layout !== "snapshot") {
-        provisionRowsWritten.push("provision skipped: no package.json")
-      } else {
-        const treeDir = path.join(cacheDir, TREE_DIRNAME)
-        const declared = readDeclaredDeps(treeDir)
-        if (declared === null) {
-          // Missing OR malformed manifest (M5): same loud row, still mounts.
-          provisionRowsWritten.push("provision skipped: no package.json")
-        } else {
-          const report = await provisionTree(treeDir, {
-            hostStores: opts.hostStores ?? [defaultHostStoreRoot()],
-            npm: provisionModeValue === "npm",
-          })
-          provisionRowsWritten.push(...provisionRows(report, provisionModeValue))
-          provisionRefused = report.refused
-          if (report.actions.length > 0) writeMarker(treeDir, report)
-        }
-      }
-    }
     atomicWrite(metaFile, `${JSON.stringify(meta, null, 2)}\n`)
     try {
       fs.chmodSync(entryFile, 0o600)
       fs.chmodSync(metaFile, 0o600)
       fs.chmodSync(cacheDir, 0o700)
     } catch {
-      // best effort — platforms without POSIX mode bits ignore this
+      // best effort - platforms without POSIX mode bits ignore this
     }
   } catch (error) {
     // Roll back OUR artifacts only: a failed first-fetch must leave NO
@@ -1559,8 +1620,41 @@ async function fetchAndRecord(
     }
     fail(
       `could not write the github: cache at ${safe(cacheDir)}: ${safe((error as Error).message, 400)}; ` +
-        `partial state was removed - nothing will be executed from an incomplete cache`,
+        `partial state was removed — nothing will be executed from an incomplete cache`,
     )
+  }
+  // PROVISIONING (spec §3) runs AFTER the write-rollback boundary on purpose:
+  // the fetched cache is complete and verified the moment the meta exists.
+  // Provisioning never participates in the first-fetch rollback - a
+  // provisioning failure (a marker write that cannot land, an npm run that
+  // misbehaves) must leave the full cache intact with a loud row, never
+  // destroy a complete verified fetch. The tree's deps declared in its
+  // manifest are junctioned from the host stores (zero network) or, per the
+  // provision option, installed with npm - BEFORE the entry's first import,
+  // with every outcome a loud mount-report row. Only fetched trees are
+  // provisioned; local and preset entries never reach this path.
+  if (provisionModeValue !== "off") {
+    if (meta.layout !== "snapshot") {
+      provisionRowsWritten.push("provision skipped: no package.json")
+    } else {
+      const treeDir = path.join(cacheDir, TREE_DIRNAME)
+      const declared = readDeclaredDeps(treeDir)
+      if (declared === null) {
+        // Missing OR malformed manifest (M5): same loud row, still mounts.
+        provisionRowsWritten.push("provision skipped: no package.json")
+      } else {
+        const report = await provisionTree(treeDir, {
+          hostStores: opts.hostStores ?? [defaultHostStoreRoot()],
+          npm: provisionModeValue === "npm",
+        })
+        provisionRowsWritten.push(...provisionRows(report, provisionModeValue))
+        provisionRefused = report.refused
+        if (report.actions.length > 0) {
+          const markerFailure = writeMarker(treeDir, report)
+          if (markerFailure !== null) provisionRowsWritten.push(`provision refused - ${markerFailure}`)
+        }
+      }
+    }
   }
   // A provision refusal is a completed cache, not a write failure: the refusal
   // row is the report; under strict it aborts SETUP here (the caller's

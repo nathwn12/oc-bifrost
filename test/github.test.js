@@ -1471,3 +1471,195 @@ test("resolveGithubPlugin: a provision refusal under strict: true aborts with th
     fs.rmSync(root, { recursive: true, force: true })
   }
 })
+
+test("resolveGithubPlugin: a warm load re-points a junction deleted from the tree (realpath coherence)", async () => {
+  const root = tmpRoot()
+  try {
+    const storeRoot = path.join(root, "store")
+    const source = writeStorePackage(storeRoot, "demo-dep", DEMO_DEP)
+    await resolveGithubPlugin(SPEC_PROVISIONED, {
+      cacheRoot: root,
+      fetchImpl: fakeFetch({ tree: PROVISION_TREE }),
+      trusted: true,
+      hostStores: [storeRoot],
+    })
+    const cacheDir = cacheDirFor(root, SPEC_PROVISIONED)
+    const dest = path.join(cacheDir, "tree", "node_modules", "demo-dep")
+    // The store stays alive; ONLY the tree-local junction disappears. This is
+    // the hole the per-target-only check left: a dead junction whose store
+    // still lives must NOT stay coherent.
+    fs.rmdirSync(dest)
+    assert.equal(fs.existsSync(dest), false, "the junction must be gone before the warm load")
+
+    const warm = await resolveGithubPlugin(SPEC_PROVISIONED, {
+      cacheRoot: root,
+      fetchImpl: noNetwork(),
+      hostStores: [storeRoot],
+    })
+    assert.equal(warm.fetched, false, "the re-point must stay zero-network")
+    assert.ok(
+      warm.provision?.includes(`provision demo-dep - host:${source}`),
+      `rows: ${JSON.stringify(warm.provision)}`,
+    )
+    assert.equal(fs.lstatSync(dest).isSymbolicLink(), true, "the junction must be re-pointed")
+    assert.equal(fs.readlinkSync(dest), source, "the junction must resolve to the host store again")
+    const module = await import(warm.url)
+    assert.equal(module.default.tag, "provisioned", "the entry must import after the re-point")
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true })
+  }
+})
+
+test("resolveGithubPlugin: a marker naming an escaping path is refused out loud, never followed", async () => {
+  const root = tmpRoot()
+  try {
+    const storeRoot = path.join(root, "store")
+    const source = writeStorePackage(storeRoot, "demo-dep", DEMO_DEP)
+    await resolveGithubPlugin(SPEC_PROVISIONED, {
+      cacheRoot: root,
+      fetchImpl: fakeFetch({ tree: PROVISION_TREE }),
+      trusted: true,
+      hostStores: [storeRoot],
+    })
+    const cacheDir = cacheDirFor(root, SPEC_PROVISIONED)
+    const escapeTarget = path.join(root, "escape")
+    fs.writeFileSync(escapeTarget, "must survive")
+    fs.writeFileSync(
+      path.join(cacheDir, "tree", "node_modules", ".bifrost-provision.json"),
+      JSON.stringify({
+        version: 1,
+        deps: ["demo-dep"],
+        actions: [
+          { package: "demo-dep", source: "host", target: source },
+          { package: "../../escape", source: "host", target: escapeTarget },
+        ],
+      }),
+    )
+    const warm = await resolveGithubPlugin(SPEC_PROVISIONED, {
+      cacheRoot: root,
+      fetchImpl: noNetwork(),
+      hostStores: [storeRoot],
+    })
+    assert.equal(warm.fetched, false, "the warm load must still serve the cache")
+    assert.ok(
+      warm.provision?.some((row) => row.startsWith("provision refused ../../escape")),
+      `rows: ${JSON.stringify(warm.provision)}`,
+    )
+    assert.equal(fs.readFileSync(escapeTarget, "utf8"), "must survive", "nothing outside the tree may be removed or written")
+    // The re-provision heals the marker: the hostile entry is gone and the
+    // next load is coherent again.
+    const healed = await resolveGithubPlugin(SPEC_PROVISIONED, {
+      cacheRoot: root,
+      fetchImpl: noNetwork(),
+      hostStores: [storeRoot],
+    })
+    assert.equal(healed.provision, undefined, "the healed marker must make the next load coherent")
+    const marker = JSON.parse(fs.readFileSync(path.join(cacheDir, "tree", "node_modules", ".bifrost-provision.json"), "utf8"))
+    assert.deepEqual(marker.actions.map((action) => action.package), ["demo-dep"], "the hostile entry must be gone from the marker")
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true })
+  }
+})
+
+test('resolveGithubPlugin: a successful npm run rows ONE "npm install --no-save" and never destroys the cache', async () => {
+  const root = tmpRoot()
+  try {
+    const emptyStore = path.join(root, "empty-store")
+    fs.mkdirSync(emptyStore, { recursive: true })
+    const shimDir = path.join(root, "shim")
+    setFakeNpm(shimDir, 0)
+    const savedPath = process.env.PATH
+    process.env.PATH = shimDir + path.delimiter + (savedPath ?? "")
+    const twoDepTree = {
+      "package.json": JSON.stringify({
+        name: "fixture",
+        version: "1.0.0",
+        dependencies: { "demo-dep": "1.0.0", "second-dep": "2.0.0" },
+      }),
+      [PROVISIONED_PATH]: 'import { tag } from "demo-dep"\nexport default { id: "demo", setup() {}, tag }\n',
+    }
+    try {
+      const result = await resolveGithubPlugin(SPEC_PROVISIONED, {
+        cacheRoot: root,
+        fetchImpl: fakeFetch({ tree: twoDepTree }),
+        trusted: true,
+        provision: "npm",
+        hostStores: [emptyStore],
+      })
+      assert.equal(result.fetched, true)
+      assert.ok(result.provision, "rows must exist")
+      const installRows = result.provision.filter((row) => row.includes("npm install --no-save"))
+      assert.equal(installRows.length, 1, `exactly ONE npm row for the whole run: ${JSON.stringify(result.provision)}`)
+      assert.equal(installRows[0], "npm install --no-save")
+      assert.ok(!result.provision.some((row) => /^provision \S+ - npm install/.test(row)), "no per-package npm rows")
+      assert.ok(!result.provision.some((row) => row.startsWith("provision refused")), "exit 0 must not refuse")
+      const cacheDir = cacheDirFor(root, SPEC_PROVISIONED)
+      // The shim exits 0 without installing ANYTHING: the marker must still
+      // land (writeMarker creates node_modules) - I-2's ENOENT scenario must
+      // never roll back a complete, verified cache.
+      const marker = JSON.parse(fs.readFileSync(path.join(cacheDir, "tree", "node_modules", ".bifrost-provision.json"), "utf8"))
+      assert.deepEqual(marker.actions.map((action) => action.source), ["npm", "npm"], "both deps must be marked npm")
+      assert.equal(fs.existsSync(path.join(cacheDir, "meta.json")), true, "the meta must survive provisioning")
+      assert.equal(
+        fs.existsSync(path.join(cacheDir, "tree", PROVISIONED_PATH)),
+        true,
+        "the fetched tree must survive provisioning",
+      )
+
+      const followUp = await resolveGithubPlugin(SPEC_PROVISIONED, {
+        cacheRoot: root,
+        fetchImpl: noNetwork(),
+        provision: "npm",
+        hostStores: [emptyStore],
+      })
+      assert.equal(followUp.fetched, false, "the follow-up load must serve the verified cache")
+    } finally {
+      process.env.PATH = savedPath
+    }
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true })
+  }
+})
+
+test("resolveGithubPlugin: a marker write failure degrades to a loud row and leaves the fetched cache complete", async () => {
+  const root = tmpRoot()
+  try {
+    const shimDir = path.join(root, "shim")
+    setFakeNpm(shimDir, 0)
+    const savedPath = process.env.PATH
+    process.env.PATH = shimDir + path.delimiter + (savedPath ?? "")
+    // A file-shaped node_modules ships in the tarball: the npm run "succeeds"
+    // (exit 0, installs nothing), the npm actions land, and the MARKER write
+    // cannot - yet the fetch itself is complete and must NOT be rolled back
+    // (I-2: provisioning trouble leaves the cache intact).
+    const sabotaged = { ...PROVISION_TREE, "node_modules": "a file blocks the marker directory" }
+    try {
+      const result = await resolveGithubPlugin(SPEC_PROVISIONED, {
+        cacheRoot: root,
+        fetchImpl: fakeFetch({ tree: sabotaged }),
+        trusted: true,
+        provision: "npm",
+        hostStores: [],
+      })
+      assert.equal(result.fetched, true, "the fetch must complete despite the marker failure")
+      assert.ok(
+        result.provision?.some((row) => row.startsWith("provision refused - could not write the provision marker")),
+        `rows: ${JSON.stringify(result.provision)}`,
+      )
+      const cacheDir = cacheDirFor(root, SPEC_PROVISIONED)
+      assert.equal(fs.existsSync(path.join(cacheDir, "meta.json")), true, "the meta must survive the marker failure")
+      assert.equal(fs.existsSync(path.join(cacheDir, "tree", "package.json")), true, "the tree must survive the marker failure")
+      const followUp = await resolveGithubPlugin(SPEC_PROVISIONED, {
+        cacheRoot: root,
+        fetchImpl: noNetwork(),
+        provision: "npm",
+        hostStores: [],
+      })
+      assert.equal(followUp.fetched, false, "the follow-up must serve the verified cache")
+    } finally {
+      process.env.PATH = savedPath
+    }
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true })
+  }
+})

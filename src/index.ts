@@ -258,7 +258,15 @@ export default Plugin.define({
       try {
         module = (await import(specifier)) as Record<string, unknown>
       } catch (error) {
-        reporter.warn(importFailureMessage(entry.spec, directory, specifier, error as Error))
+        // The import failed BEFORE the mount note could be rendered, but the
+        // provisioning that already ran is a real outcome - never silently lost
+        // with the failure (a refused peer is the reason the import failed in
+        // the first place, and it must be visible).
+        const provisionRows = gh?.provision ?? []
+        const importMessage = importFailureMessage(entry.spec, directory, specifier, error as Error)
+        reporter.warn(
+          provisionRows.length === 0 ? importMessage : `${importMessage} (${provisionRows.join("; ")})`,
+        )
         if (options.strict) throw error
         continue
       }
@@ -325,9 +333,10 @@ export default Plugin.define({
       // The cli.json path is CALLER-computed: the `cliJsonPath` option
       // overrides the default `~/.config/opencode/cli.json`, and wire-tui.ts
       // never guesses it. Whether a wrapper is needed is wire-tui's own
-      // condition - not duplicated here. A wire failure or refusal is a loud
-      // row (never silent, never swallowed) and can never abort the mount
-      // itself: the plugin already mounted.
+      // condition - not duplicated here. A tree that ships no TUI entry is a
+      // clean skip (an informational row, nothing written); a wire failure or
+      // refusal is a loud row (never silent, never swallowed) and can never
+      // abort the mount itself: the plugin already mounted.
       if (
         mounted &&
         resolved.kind === "github" &&
@@ -344,7 +353,7 @@ export default Plugin.define({
           reporter.record(
             `wire:${resolved.spec.owner}/${resolved.spec.repo}`,
             "mounted",
-            `TUI entry ${wired.entry} wired into ${cliJsonPath}`,
+            wired.kind === "skipped" ? wired.reason : `TUI entry ${wired.entry} wired into ${cliJsonPath}`,
           )
         } catch (error) {
           reporter.warn(

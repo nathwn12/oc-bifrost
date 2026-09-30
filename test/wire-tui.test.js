@@ -11,7 +11,11 @@ import { wireTui, unwireTui, __setWireTuiSeamForTests } from "../dist/wire-tui.j
  *
  *   - wrapper: a `tui.tsx` re-export at the tree root, created ONLY when the
  *     tree lacks a loadable `tui.{ts,tsx}` (a directory does not count);
- *     idempotent - a loadable file means no write, ever
+ *     idempotent - a loadable file means no write, ever. The re-export target
+ *     is the tree's own `exports["./tui"]` / `tui` field / a discovered
+ *     `src/tui/index.tsx`. A tree that ships NONE of those is a clean skip -
+ *     no wrapper, no cli.json entry, an informational row - while a DECLARED
+ *     target that names no real file inside the tree is refused loudly
  *   - cli.json: a TEXT merge that splices ONLY the `plugins` key. The exact
  *     entry string is `url.pathToFileURL(treeDir).href` (forward slashes,
  *     matching the live, load-verified entry form) and dedupe is by that
@@ -30,6 +34,18 @@ import { wireTui, unwireTui, __setWireTuiSeamForTests } from "../dist/wire-tui.j
 
 const WRAPPER_CONTENT = 'export { default } from "./src/tui/index.tsx";\n'
 
+/** Write a tree with a package manifest and/or a real nested TUI entry file. */
+function writeTuiTree(tree, { manifest, files = {} } = {}) {
+  fs.mkdirSync(tree, { recursive: true })
+  if (manifest !== undefined) fs.writeFileSync(path.join(tree, "package.json"), JSON.stringify(manifest))
+  for (const [rel, content] of Object.entries(files)) {
+    const p = path.join(tree, rel)
+    fs.mkdirSync(path.dirname(p), { recursive: true })
+    fs.writeFileSync(p, content)
+  }
+  return tree
+}
+
 // The exact marker comments wire-tui writes (the byte-level ownership
 // contract unwireTui relies on; keep these in lockstep with src/wire-tui.ts).
 const CREATED_KEY_MARKER = "// oc-bifrost: managed TUI entry (key auto-created; safe to remove with it)"
@@ -42,10 +58,29 @@ function tmpRoot() {
   return fs.mkdtempSync(path.join(os.tmpdir(), "oc-bifrost-wire-test-"))
 }
 
-function writeTree(root) {
-  const tree = path.join(root, "tree")
-  fs.mkdirSync(tree, { recursive: true })
-  return tree
+/**
+ * A tree directory carrying the discovered `src/tui/index.tsx` target.
+ *
+ * A REAL provisioned tree that HAS a TUI ships a determinable entry, and every
+ * fixture whose subject is the cli.json merge/unwire needs one - without it the
+ * wire step is a clean skip (nothing written, cli.json never opened) and the
+ * code under test is never reached. Trees whose subject IS the absence of an
+ * entry pass `{ tuiEntry: false }`; a tree that DECLARES an entry it does not
+ * ship is built with `writeTuiTree(..., { manifest: { exports: { "./tui": ... } } })`
+ * and must refuse loudly.
+ */
+function writeTreeAt(dir, { tuiEntry = true } = {}) {
+  fs.mkdirSync(dir, { recursive: true })
+  if (tuiEntry) {
+    const entry = path.join(dir, "src", "tui", "index.tsx")
+    fs.mkdirSync(path.dirname(entry), { recursive: true })
+    fs.writeFileSync(entry, "export default {}\n")
+  }
+  return dir
+}
+
+function writeTree(root, options) {
+  return writeTreeAt(path.join(root, "tree"), options)
 }
 
 function writeCli(root, content) {
@@ -57,16 +92,121 @@ function writeCli(root, content) {
 
 /* ---- wrapper ---- */
 
-test("wireTui: creates the tui.tsx wrapper when the tree lacks a loadable tui.{ts,tsx}", async () => {
+test("wireTui: creates the tui.tsx wrapper re-exporting the tree's own exports[\"./tui\"] target", async () => {
   const root = tmpRoot()
   try {
-    const tree = writeTree(root)
+    const tree = writeTuiTree(writeTree(root), {
+      manifest: {
+        name: "widget",
+        version: "1.0.0",
+        exports: { "./tui": { types: "./tui/deck.tsx", import: "./tui/deck.tsx" } },
+      },
+      files: { "tui/deck.tsx": "export default {}\n" },
+    })
     const cli = writeCli(root, '{\n  "verbosity": 2\n}\n')
     const out = await wireTui(tree, cli)
     assert.equal(out.wrapper, path.join(tree, "tui.tsx"))
     assert.equal(out.entry, pathToFileURL(tree).href, "the entry must be exactly pathToFileURL(treeDir).href")
     assert.ok(out.entry.startsWith("file:///"), "the entry must be a file URL with forward slashes")
+    assert.equal(
+      fs.readFileSync(path.join(tree, "tui.tsx"), "utf8"),
+      'export { default } from "./tui/deck.tsx";\n',
+      "the wrapper must re-export the tree's OWN declared tui entry, not a hardcoded path",
+    )
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true })
+  }
+})
+
+test("wireTui: the wrapper target falls back to a top-level tui field", async () => {
+  const root = tmpRoot()
+  try {
+    const tree = writeTuiTree(writeTree(root), {
+      manifest: { name: "widget", version: "1.0.0", tui: "./tui/main.tsx" },
+      files: { "tui/main.tsx": "export default {}\n" },
+    })
+    const cli = writeCli(root, "{}")
+    await wireTui(tree, cli)
+    assert.equal(
+      fs.readFileSync(path.join(tree, "tui.tsx"), "utf8"),
+      'export { default } from "./tui/main.tsx";\n',
+      "a tui field must drive the wrapper target",
+    )
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true })
+  }
+})
+
+test("wireTui: the wrapper target falls back to a discovered src/tui/index.tsx", async () => {
+  const root = tmpRoot()
+  try {
+    const tree = writeTuiTree(writeTree(root), {
+      manifest: { name: "widget", version: "1.0.0" },
+      files: { "src/tui/index.tsx": "export default {}\n" },
+    })
+    const cli = writeCli(root, "{}")
+    await wireTui(tree, cli)
     assert.equal(fs.readFileSync(path.join(tree, "tui.tsx"), "utf8"), WRAPPER_CONTENT)
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true })
+  }
+})
+
+test("wireTui: a tree with no TUI entry at all is a clean skip - no wrapper, no cli.json entry", async () => {
+  const root = tmpRoot()
+  try {
+    const tree = writeTuiTree(writeTree(root, { tuiEntry: false }), { manifest: { name: "widget", version: "1.0.0" } })
+    const before = '{\n  "verbosity": 2\n}\n'
+    const cli = writeCli(root, before)
+    const out = await wireTui(tree, cli)
+    assert.equal(out.kind, "skipped", "a tree with no TUI entry must be skipped, never refused")
+    assert.match(out.reason, /no TUI entry found/, "the informational row must say what was not found")
+    assert.ok(out.reason.includes(tree), "the informational row must name the tree")
+    assert.ok(!out.reason.includes("[oc-bifrost]"), "a skip is informational, never a refusal")
+    assert.equal(fs.existsSync(path.join(tree, "tui.tsx")), false, "a skip must write no wrapper")
+    assert.equal(fs.readFileSync(cli, "utf8"), before, "a skip must not touch cli.json at all")
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true })
+  }
+})
+
+test("wireTui: a declared ./tui target that is not a real file refuses loudly, writing nothing", async () => {
+  const root = tmpRoot()
+  try {
+    const tree = writeTuiTree(writeTree(root, { tuiEntry: false }), {
+      manifest: { name: "widget", version: "1.0.0", exports: { "./tui": "./src/tui/index.tsx" } },
+    })
+    const before = '{\n  "verbosity": 2\n}\n'
+    const cli = writeCli(root, before)
+    await assert.rejects(
+      () => wireTui(tree, cli),
+      (e) =>
+        e instanceof Error &&
+        e.message.includes("[oc-bifrost]") &&
+        e.message.includes('"src/tui/index.tsx"') &&
+        e.message.includes(tree),
+      "a declared target that is not a real file must refuse, naming the declaration and the tree",
+    )
+    assert.equal(fs.existsSync(path.join(tree, "tui.tsx")), false, "a refusal must write no wrapper")
+    assert.equal(fs.readFileSync(cli, "utf8"), before, "a refusal must not touch cli.json")
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true })
+  }
+})
+
+test("wireTui: a top-level tui field naming a missing file refuses loudly too", async () => {
+  const root = tmpRoot()
+  try {
+    const tree = writeTuiTree(writeTree(root, { tuiEntry: false }), {
+      manifest: { name: "widget", version: "1.0.0", tui: "./tui/main.tsx" },
+    })
+    const cli = writeCli(root, "{}")
+    await assert.rejects(
+      () => wireTui(tree, cli),
+      (e) => e instanceof Error && e.message.includes("[oc-bifrost]") && e.message.includes('"tui/main.tsx"'),
+      "the `tui` field is a declaration like any other: an absent target refuses",
+    )
+    assert.equal(fs.existsSync(path.join(tree, "tui.tsx")), false)
   } finally {
     fs.rmSync(root, { recursive: true, force: true })
   }
@@ -111,7 +251,10 @@ test("wireTui: a tui.ts that is a DIRECTORY does not count as loadable; a tui.ts
   const root = tmpRoot()
   try {
     const cli = writeCli(root, "{}")
-    const treeDir = writeTree(root)
+    const treeDir = writeTuiTree(writeTree(root), {
+      manifest: { name: "widget", version: "1.0.0", exports: { "./tui": "./src/tui/index.tsx" } },
+      files: { "src/tui/index.tsx": "export default {}\n" },
+    })
     fs.mkdirSync(path.join(treeDir, "tui.ts"), { recursive: true })
     const out = await wireTui(treeDir, cli)
     assert.equal(out.wrapper, path.join(treeDir, "tui.tsx"), "a tui.ts directory must not block the wrapper")
@@ -381,10 +524,8 @@ test("unwireTui: removes only our entry from a user-owned plugins array, restori
 test("unwireTui: two wired trees in one user-owned plugins array coalesce into a byte-exact restore (regression)", async () => {
   const root = tmpRoot()
   try {
-    const treeA = path.join(root, "tree-a")
-    const treeB = path.join(root, "tree-b")
-    fs.mkdirSync(treeA, { recursive: true })
-    fs.mkdirSync(treeB, { recursive: true })
+    const treeA = writeTreeAt(path.join(root, "tree-a"))
+    const treeB = writeTreeAt(path.join(root, "tree-b"))
     const before = '{\n  "plugins": ["keep-me", "keep-me-2"]\n}\n'
     const cli = writeCli(root, before)
     await wireTui(treeA, cli)
@@ -427,10 +568,8 @@ test("unwireTui: a user entry added AFTER ours unwires to a parseable array - on
 test("unwireTui: a user entry BETWEEN two of ours unwires to a valid array (coalesced-span regression)", async () => {
   const root = tmpRoot()
   try {
-    const treeA = path.join(root, "tree-a")
-    const treeB = path.join(root, "tree-b")
-    fs.mkdirSync(treeA, { recursive: true })
-    fs.mkdirSync(treeB, { recursive: true })
+    const treeA = writeTreeAt(path.join(root, "tree-a"))
+    const treeB = writeTreeAt(path.join(root, "tree-b"))
     const urlA = pathToFileURL(treeA).href
     const urlB = pathToFileURL(treeB).href
     const cli = writeCli(root, '{\n  "plugins": ["u1","u2"]\n}\n')

@@ -162,12 +162,17 @@ test("multi-plugin: options are not shared between entries", async () => {
  * zero network, exactly what a first-fetched-and-cached plugin looks like.
  * The entry file is a `.mjs` V1 factory (plain Node cannot import `.ts`).
  */
-function writeWarmGithubSnapshot(cacheRoot, spec, { entryName = "plugin.mjs", entryContent, manifest }) {
+function writeWarmGithubSnapshot(cacheRoot, spec, { entryName = "plugin.mjs", entryContent, manifest, tuiEntry } = {}) {
   const cacheDir = path.join(githubCacheLayoutRoot(cacheRoot), githubCacheId(spec))
   const treeDir = path.join(cacheDir, "tree")
   fs.mkdirSync(treeDir, { recursive: true })
   fs.writeFileSync(path.join(treeDir, "package.json"), JSON.stringify(manifest))
   fs.writeFileSync(path.join(treeDir, entryName), entryContent)
+  if (tuiEntry !== undefined) {
+    const tuiPath = path.join(treeDir, tuiEntry)
+    fs.mkdirSync(path.dirname(tuiPath), { recursive: true })
+    fs.writeFileSync(tuiPath, "export default {}\n")
+  }
   fs.writeFileSync(
     path.join(cacheDir, "meta.json"),
     JSON.stringify(
@@ -223,7 +228,14 @@ test("wireTui: true wires a mounted github: snapshot into the caller-provided cl
       // here), so the warm cache must sit exactly there.
       const { treeDir } = writeWarmGithubSnapshot(githubCacheRoot(), spec, {
         entryContent: WIDGET_ENTRY,
-        manifest: { name: "widget", version: "1.0.0" }, // zero declared deps: no provision rows, clean mount
+        // Zero declared deps: no provision rows, clean mount. It DOES carry a
+        // tui export, so the wrapper target is determinable.
+        manifest: {
+          name: "widget",
+          version: "1.0.0",
+          exports: { "./tui": "./src/tui/index.tsx" },
+        },
+        tuiEntry: "src/tui/index.tsx",
       })
       const cli = path.join(root, "cli.json")
       fs.writeFileSync(cli, '{\n  "verbosity": 2\n}\n')
@@ -290,7 +302,8 @@ test("wireTui: OC_BIFROST_WIRE_TUI=1 opts in when the option is omitted; an expl
       const spec = { owner: "acme", repo: "widget" }
       const one = writeWarmGithubSnapshot(githubCacheRoot(), spec, {
         entryContent: WIDGET_ENTRY,
-        manifest: { name: "widget", version: "1.0.0" },
+        manifest: { name: "widget", version: "1.0.0", exports: { "./tui": "./src/tui/index.tsx" } },
+        tuiEntry: "src/tui/index.tsx",
       })
       const cli = path.join(root, "cli-one.json")
       fs.writeFileSync(cli, '{\n  "verbosity": 2\n}\n')
@@ -325,6 +338,113 @@ test("wireTui: OC_BIFROST_WIRE_TUI=1 opts in when the option is omitted; an expl
   }
 })
 
+/* ---- provision rows must survive a failed entry import ---- */
+
+/**
+ * The live flight-deck failure mode, in miniature: provisioning REFUSES a
+ * declared peer (no host-store hit, npm off), and the tree's entry imports
+ * that very peer - so the import fails before the mount note that would have
+ * carried the rows is ever rendered. The rows are the diagnosis, so losing
+ * them with the failure is losing the only explanation the operator gets.
+ */
+test("provision: a refused dep's rows survive an entry-import failure (never swallowed)", async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "bifrost-multi-provision-fail-"))
+  try {
+    await withXdgCacheHome(root, async () => {
+      const spec = { owner: "acme", repo: "thirsty" }
+      // `@acme/absent-peer` exists in no host store (the redirected XDG host
+      // store root is empty), and "host" mode has no npm fallback: the refusal
+      // is a real outcome. The entry then imports it and cannot resolve it.
+      writeWarmGithubSnapshot(githubCacheRoot(), spec, {
+        entryContent: 'import "@acme/absent-peer"\nexport default {}\n',
+        manifest: { name: "thirsty", version: "1.0.0", dependencies: { "@acme/absent-peer": "^1.0.0" } },
+      })
+      const { ctx } = fakeContext()
+      ctx.options = { plugins: ["github:acme/thirsty"], provision: "host" }
+
+      const warned = []
+      const savedWarn = console.warn
+      console.warn = (line) => warned.push(String(line))
+      try {
+        // No `strict`: a failed import is a warned branch, never a rejection.
+        await bifrost.setup(ctx)
+      } finally {
+        console.warn = savedWarn
+      }
+
+      const joined = warned.join("\n")
+      assert.ok(joined.includes("could not import"), `the import failure must stay loud, got:\n${joined}`)
+      assert.ok(
+        joined.includes("provision refused @acme/absent-peer"),
+        `the provision row must ride the import failure, not vanish with it, got:\n${joined}`,
+      )
+    })
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true })
+  }
+})
+
+test("wireTui: a tree with no TUI entry is a clean skip row and cli.json is never opened", async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "bifrost-multi-wire-skip-"))
+  try {
+    await withXdgCacheHome(root, async () => {
+      const spec = { owner: "acme", repo: "plain" }
+      const { treeDir } = writeWarmGithubSnapshot(githubCacheRoot(), spec, {
+        entryContent: WIDGET_ENTRY,
+        // No ./tui export, no `tui` field, no src/tui/index.tsx: a V1 plugin
+        // with no TUI at all (the live rtk/superpowers/ascii shape). That is a
+        // SKIP, not a refusal - a refusal would warn on every reconciliation.
+        manifest: { name: "plain", version: "1.0.0" },
+      })
+      const cli = path.join(root, "cli.json")
+      const before = '{\n  "verbosity": 2\n}\n'
+      fs.writeFileSync(cli, before)
+      const { ctx, fire } = fakeContext()
+      ctx.options = { plugins: ["github:acme/plain"], wireTui: true, cliJsonPath: cli }
+
+      const logged = []
+      const warned = []
+      const savedLog = console.log
+      const savedWarn = console.warn
+      console.log = (line) => logged.push(String(line))
+      console.warn = (line) => warned.push(String(line))
+      try {
+        const cleanup = await bifrost.setup(ctx)
+        const event = shellEvent("ls")
+        await fire("tool:execute.before", event)
+        // The fixture's entry uses the WIDGET_ENTRY prefix even though the repo
+        // is named `plain` - the mount behaviour is what is under test here.
+        assert.equal(event.input.command, "widget:ls", "the plugin must mount as usual")
+        await cleanup()
+      } finally {
+        console.log = savedLog
+        console.warn = savedWarn
+      }
+
+      assert.equal(fs.existsSync(path.join(treeDir, "tui.tsx")), false, "a skip must write no wrapper")
+      assert.equal(fs.readFileSync(cli, "utf8"), before, "a skip must leave cli.json untouched")
+      const report = logged.join("\n")
+      assert.ok(
+        report.includes("no TUI entry found") && report.includes(treeDir),
+        `the skip must be one informational row naming the tree, got:\n${report}`,
+      )
+      // The plugin's OWN load-time compat refusals (`client.tui.*`,
+      // `client.session.children` - context.ts states them at load, before any
+      // wiring runs) are not about the wire step. Everything the wiring could
+      // say here would name the tree, the wrapper, or cli.json: none of that
+      // may appear, because a skip opens cli.json and writes nothing.
+      const wiringWarnings = warned.filter((line) => !/client\.(tui|session)/i.test(line))
+      assert.deepEqual(
+        wiringWarnings,
+        [],
+        `a skip must not be a warning about wiring, got:\n${wiringWarnings.join("\n")}`,
+      )
+    })
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true })
+  }
+})
+
 test("wireTui: a wire refusal is a loud row and never aborts the mounted plugin", async () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "bifrost-multi-wire-fail-"))
   try {
@@ -332,7 +452,10 @@ test("wireTui: a wire refusal is a loud row and never aborts the mounted plugin"
       const spec = { owner: "acme", repo: "widget" }
       writeWarmGithubSnapshot(githubCacheRoot(), spec, {
         entryContent: WIDGET_ENTRY,
-        manifest: { name: "widget", version: "1.0.0" },
+        // A determinable TUI entry, so the wire step REACHES cli.json (a tree
+        // with none would skip cleanly and never touch it).
+        manifest: { name: "widget", version: "1.0.0", exports: { "./tui": "./src/tui/index.tsx" } },
+        tuiEntry: "src/tui/index.tsx",
       })
       // Not a balanced JSONC object: wireTui refuses loudly (never guess-writes).
       const cli = path.join(root, "cli.json")

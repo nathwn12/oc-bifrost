@@ -6,11 +6,24 @@
  * entry, and (b) the harness `cli.json` carries a `plugins` entry that is the
  * tree as a `file://` URL. This module automates both steps:
  *
- *   - WRAPPER, IDEMPOTENT. `tui.tsx` is created ONLY when the tree lacks a
- *     loadable `tui.{ts,tsx}` - a file that exists but is a directory does
- *     NOT count as loadable. A loadable entry means no write, ever. When the
- *     wrapper cannot be created (the `tui.tsx` path is blocked by a
- *     directory) the module refuses loudly.
+ *   - WRAPPER, IDEMPOTENT, AND SKIPPED WHEN THERE IS NOTHING TO WIRE.
+ *     `tui.tsx` is created ONLY when the tree lacks a loadable
+ *     `tui.{ts,tsx}` - a file that exists but is a directory does NOT count
+ *     as loadable. A loadable entry means no write, ever. The wrapper
+ *     re-exports the TREE'S OWN tui entry, derived in order from the tree
+ *     manifest: `exports["./tui"]` (import/default/require), a top-level
+ *     `tui` field, then a discovered `src/tui/index.tsx`.
+ *     Three outcomes, deliberately distinct:
+ *       - a derivable target -> the wrapper is written (or already there);
+ *       - a tree that ships NO tui entry AT ALL (no declaration, no
+ *         discovered `src/tui/index.tsx`, no loadable `tui.{ts,tsx}`) -> a
+ *         clean SKIP: no wrapper, no cli.json entry, one informational row
+ *         naming the tree. A tree without a TUI has nothing to wire, and a
+ *         refusal would spam a warning on every reconciliation;
+ *       - a DECLARED `./tui` target that is not a real file inside the tree,
+ *         or a directory occupying the wrapper path -> a loud refusal. The
+ *         manifest says a TUI entry exists, so either writing a hardcoded
+ *         wrapper or passing silently would hide a broken tree.
  *   - CLI.JSON, TEXT MERGE. The merge is a read-as-text splice that touches
  *     ONLY the top-level `plugins` key: `$schema`, comments, every other
  *     key, and their exact formatting survive byte-for-byte. Entry form is
@@ -44,11 +57,14 @@
  * only; zero runtime dependencies.
  */
 import { readFile, rename, stat, unlink, writeFile } from "node:fs/promises"
-import { statSync } from "node:fs"
-import { basename, dirname, join } from "node:path"
+import { readFileSync, statSync } from "node:fs"
+import { basename, dirname, isAbsolute, join, relative, resolve, sep } from "node:path"
 import { pathToFileURL } from "node:url"
 
-export const WRAPPER_CONTENT = 'export { default } from "./src/tui/index.tsx";\n'
+/** The `tui.tsx` re-export body for a tree-relative `target` (e.g. `src/tui/index.tsx`). */
+export function wrapperContent(target: string): string {
+  return `export { default } from "./${target.replace(/^\.\//, "")}";\n`
+}
 
 /** Inside an array WE created: marks the whole key as ours to remove. */
 export const CREATED_KEY_MARKER = "// oc-bifrost: managed TUI entry (key auto-created; safe to remove with it)"
@@ -551,7 +567,96 @@ async function readMergeWriteStable(
   return false // unreachable (refuse throws)
 }
 
-async function ensureWrapper(treeDir: string): Promise<string | null> {
+function stripDotSlash(p: string): string {
+  return p.startsWith("./") ? p.slice(2) : p
+}
+
+/** The runnable path a `./tui` export maps to: `import`, then `default`, then `require`. */
+function runnableExportPath(value: unknown): string | null {
+  if (typeof value === "string") return stripDotSlash(value)
+  if (value === null || typeof value !== "object" || Array.isArray(value)) return null
+  const record = value as Record<string, unknown>
+  for (const key of ["import", "default", "require"]) {
+    const candidate = record[key]
+    if (typeof candidate === "string") return stripDotSlash(candidate)
+  }
+  return null
+}
+
+/** `candidate` as a posix tree-relative path when it names a real file inside `treeDir`; else null. */
+function realFileInsideTree(treeDir: string, candidate: string): string | null {
+  const resolved = resolve(treeDir, candidate)
+  const rel = relative(treeDir, resolved)
+  if (rel === "" || rel.startsWith("..") || isAbsolute(rel)) return null
+  try {
+    if (!statSync(resolved).isFile()) return null
+  } catch {
+    return null
+  }
+  return rel.split(sep).join("/")
+}
+
+/** The discovered fallback location of a tree's TUI entry. */
+const DISCOVERED_TUI = "src/tui/index.tsx"
+
+/**
+ * What the wrapper step learned about the tree's TUI entry:
+ *   - `found`            - a real file inside the tree to re-export;
+ *   - `declared-missing` - the manifest declares a `./tui` target (export or
+ *                          `tui` field) that is NOT a real file inside the
+ *                          tree: a broken declaration, refused loudly;
+ *   - `none`             - the tree ships no TUI entry at all: skip cleanly.
+ */
+type TuiTarget =
+  | { kind: "found"; target: string }
+  | { kind: "declared-missing"; declared: string }
+  | { kind: "none" }
+
+/**
+ * The tree's own TUI entry, tree-relative. Declaration order:
+ * `exports["./tui"]` (import/default/require), then a top-level `tui` field,
+ * then the discovered `src/tui/index.tsx`. A declaration is authoritative: a
+ * declared target that names no real file inside the tree is reported as
+ * `declared-missing` (refused), never silently replaced by a fallback that the
+ * manifest does not consider the entry.
+ */
+function tuiTarget(treeDir: string): TuiTarget {
+  const declarations: string[] = []
+  let manifest: Record<string, unknown> | null = null
+  try {
+    const parsed: unknown = JSON.parse(readFileSync(join(treeDir, "package.json"), "utf8"))
+    if (parsed !== null && typeof parsed === "object" && !Array.isArray(parsed)) {
+      manifest = parsed as Record<string, unknown>
+    }
+  } catch {
+    // no readable manifest: fall through to the discovered target
+  }
+  if (manifest !== null) {
+    const exportsValue = manifest.exports
+    if (exportsValue !== null && typeof exportsValue === "object" && !Array.isArray(exportsValue)) {
+      const fromExport = runnableExportPath((exportsValue as Record<string, unknown>)!["./tui"])
+      if (fromExport !== null) declarations.push(fromExport)
+    }
+    if (typeof manifest.tui === "string") declarations.push(stripDotSlash(manifest.tui))
+  }
+  for (const declared of declarations) {
+    const target = realFileInsideTree(treeDir, declared)
+    if (target !== null) return { kind: "found", target }
+  }
+  const discovered = realFileInsideTree(treeDir, DISCOVERED_TUI)
+  if (discovered !== null) return { kind: "found", target: discovered }
+  if (declarations.length > 0) return { kind: "declared-missing", declared: declarations[0]! }
+  return { kind: "none" }
+}
+
+/**
+ * The wrapper step's outcome: `wrapped` (this call wrote it), `present` (a
+ * loadable entry already exists - no write, ever), or `absent` (the tree ships
+ * no TUI entry at all - the caller skips the whole wire cleanly).
+ */
+type WrapperStep = { kind: "wrapped"; wrapper: string } | { kind: "present" } | { kind: "absent" }
+
+async function ensureWrapper(treeDir: string): Promise<WrapperStep> {
   const wrapperPath = join(treeDir, "tui.tsx")
   let blockedByDirectory = false
   for (const name of ["tui.ts", "tui.tsx"]) {
@@ -561,32 +666,58 @@ async function ensureWrapper(treeDir: string): Promise<string | null> {
     } catch {
       continue // absent: not loadable
     }
-    if (st.isFile()) return null // a loadable entry already exists
+    if (st.isFile()) return { kind: "present" } // a loadable entry already exists
     if (name === "tui.tsx" && st.isDirectory()) blockedByDirectory = true
   }
   if (blockedByDirectory) {
     throw new Error(`[oc-bifrost] refusing to create TUI wrapper ${wrapperPath}: a directory occupies that path`)
   }
+  const target = tuiTarget(treeDir)
+  if (target.kind === "none") return { kind: "absent" }
+  if (target.kind === "declared-missing") {
+    throw new Error(
+      `[oc-bifrost] refusing to create TUI wrapper ${wrapperPath}: the tree declares "./tui" at ` +
+        `"${target.declared}", which is not a real file inside ${treeDir}`,
+    )
+  }
   try {
-    await writeFile(wrapperPath, WRAPPER_CONTENT, "utf8")
+    await writeFile(wrapperPath, wrapperContent(target.target), "utf8")
   } catch (e) {
     throw new Error(
       `[oc-bifrost] refusing to create TUI wrapper ${wrapperPath}: ${e instanceof Error ? e.message : String(e)}`,
     )
   }
-  return wrapperPath
+  return { kind: "wrapped", wrapper: wrapperPath }
 }
+
+/**
+ * The outcome of one `wireTui` call:
+ *   - `wired`   - the tree's `file://` URL is in cli.json; `wrapper` is the
+ *                 wrapper this call wrote, or null when a loadable entry
+ *                 already existed;
+ *   - `skipped` - the tree ships no TUI entry, so NOTHING was written (no
+ *                 wrapper, no cli.json entry). `reason` is the informational
+ *                 row for the caller: not a refusal, not a warning.
+ */
+export type WireTuiOutcome =
+  | { kind: "wired"; wrapper: string | null; entry: string }
+  | { kind: "skipped"; reason: string }
 
 /**
  * Wire a provisioned tree's TUI entry: ensure the root wrapper, then add the
  * tree (as a `file://` URL) to the plugins array of the caller-provided
- * cli.json, byte-preserving everything else (see the module contract).
+ * cli.json, byte-preserving everything else (see the module contract). A tree
+ * that ships no TUI entry at all is a clean skip: nothing is written and
+ * cli.json is never opened.
  */
-export async function wireTui(treeDir: string, cliJsonPath: string): Promise<{ wrapper: string | null; entry: string }> {
+export async function wireTui(treeDir: string, cliJsonPath: string): Promise<WireTuiOutcome> {
+  const step = await ensureWrapper(treeDir)
+  if (step.kind === "absent") {
+    return { kind: "skipped", reason: `no TUI entry found in ${treeDir}; nothing to wire` }
+  }
   const entry = pathToFileURL(treeDir).href
-  const wrapper = await ensureWrapper(treeDir)
   await readMergeWriteStable(cliJsonPath, "refuse", (text) => mergePluginsEntry(text, entry, cliJsonPath))
-  return { wrapper, entry }
+  return { kind: "wired", wrapper: step.kind === "wrapped" ? step.wrapper : null, entry }
 }
 
 /**

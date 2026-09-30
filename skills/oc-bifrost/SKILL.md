@@ -21,7 +21,7 @@ Plugin must export a default definition with an id and an effect or setup functi
 2. `opencode debug paths` → read the `config` line. **Use that path.** Never assume `~/.config/opencode`.
 3. Move the legacy plugin out of any discovered plugin directory — `.opencode/legacy/<name>.ts`. A V1 file left in `.opencode/plugins/` is rejected before the bridge can see it.
 4. Add the bridge to the config's `plugins` array — one entry; OpenCode resolves the package, no `npm i`:
-   `{ "package": "@nathwn12/oc-bifrost@1.4.1", "options": { "plugins": ["<one specifier>"] } }`
+   `{ "package": "@nathwn12/oc-bifrost@1.4.2", "options": { "plugins": ["<one specifier>"] } }`
    The specifier is exactly one of three paths:
    - `github:<owner>/<repo>[@<ref>][#<path>]` — **the advertised, default route**, by source (requires oc-bifrost 0.4.0 or later; releases 0.3.0 and below cannot mount it).
      The first fetch downloads a plugin from GitHub and EXECUTES it with the host process's full user
@@ -55,7 +55,7 @@ If the plugin depends on an `unsupported` hook, report it as a **port candidate*
 - Never silently enable `trustRemote` for a `github:` plugin: it executes publisher code with the
   host process's full user rights. Surface that decision to the human.
 - Never permanently change the host environment to make a test pass.
-- Pin the bridge version explicitly — `"@nathwn12/oc-bifrost@1.4.1"` by default, `@^1.0.0` to track 1.x; a
+- Pin the bridge version explicitly — `"@nathwn12/oc-bifrost@1.4.2"` by default, `@^1.0.0` to track 1.x; a
   bare or `@latest` specifier may be unstable while OpenCode's plugin cache settles — run
   `opencode plugin check`, or delete `~/.cache/opencode/npm/@nathwn12/oc-bifrost@latest` and reload.
 - For any read of the OpenCode source, cite `file:line`.

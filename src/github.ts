@@ -749,6 +749,12 @@ async function resolveCommit(
   ref: string,
   signal: AbortSignal,
 ): Promise<string> {
+  // A full 40-hex ref already IS the commit identity the API would return -
+  // the resolution call could only echo it back, so it is skipped outright:
+  // fully-pinned specs must mount even where the API is unreachable.
+  if (COMMIT_PATTERN.test(ref)) {
+    return ref.toLowerCase()
+  }
   const url = apiCommitUrl(spec.owner, spec.repo, ref)
   let response: FetchResponseLike
   try {

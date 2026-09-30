@@ -404,6 +404,52 @@ test("unwireTui: two wired trees in one user-owned plugins array coalesce into a
   }
 })
 
+test("unwireTui: a user entry added AFTER ours unwires to a parseable array - only ONE separator is ours (M27 regression)", async () => {
+  const root = tmpRoot()
+  try {
+    const tree = writeTree(root)
+    const entry = pathToFileURL(tree).href
+    const cli = writeCli(root, '{\n  "plugins": ["u1","u2"]\n}\n')
+    await wireTui(tree, cli)
+    // The user appends their own entry after our managed pair. The comma after
+    // our entry is now THEIR separator - claiming it (plus the leading one)
+    // would splice out both and leave "u2" "u3" (a JSON syntax error).
+    fs.writeFileSync(cli, `{\n  "plugins": ["u1","u2",\n    ${ENTRY_MARKER}\n    "${entry}", "u3"\n]\n}\n`)
+    assert.equal(await unwireTui(cli), true)
+    const after = fs.readFileSync(cli, "utf8")
+    assert.deepEqual(JSON.parse(after).plugins, ["u1", "u2", "u3"], "the user's entry must survive and the array must parse")
+    assert.equal(after, '{\n  "plugins": ["u1","u2", "u3"\n]\n}\n', "only our own separator may be removed")
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true })
+  }
+})
+
+test("unwireTui: a user entry BETWEEN two of ours unwires to a valid array (coalesced-span regression)", async () => {
+  const root = tmpRoot()
+  try {
+    const treeA = path.join(root, "tree-a")
+    const treeB = path.join(root, "tree-b")
+    fs.mkdirSync(treeA, { recursive: true })
+    fs.mkdirSync(treeB, { recursive: true })
+    const urlA = pathToFileURL(treeA).href
+    const urlB = pathToFileURL(treeB).href
+    const cli = writeCli(root, '{\n  "plugins": ["u1","u2"]\n}\n')
+    await wireTui(treeA, cli)
+    await wireTui(treeB, cli)
+    // The user inserts their own entry between our two managed entries.
+    fs.writeFileSync(
+      cli,
+      `{\n  "plugins": ["u1","u2",\n    ${ENTRY_MARKER}\n    "${urlA}", "uX",\n    ${ENTRY_MARKER}\n    "${urlB}"\n]\n}\n`,
+    )
+    assert.equal(await unwireTui(cli), true)
+    const after = fs.readFileSync(cli, "utf8")
+    assert.deepEqual(JSON.parse(after).plugins, ["u1", "u2", "uX"], "the user's entry must survive and the array must parse")
+    assert.equal(after, '{\n  "plugins": ["u1","u2", "uX"\n]\n}\n')
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true })
+  }
+})
+
 test("unwireTui: keeps user entries that were added after we created the key", async () => {
   const root = tmpRoot()
   try {
@@ -432,6 +478,24 @@ test("unwireTui: returns false when there is nothing of ours to remove, touching
     assert.equal(fs.readFileSync(cli, "utf8"), before)
 
     assert.equal(await unwireTui(path.join(root, "missing.json")), false, "a missing cli.json is nothing to do")
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true })
+  }
+})
+
+test("wireTui: a splice that would leave a malformed plugins array is refused loudly, writing nothing", async () => {
+  const root = tmpRoot()
+  try {
+    const tree = writeTree(root)
+    // The user's file already lacks a separator; any splice keeps it malformed,
+    // so the pre-write validation must refuse rather than rewrite.
+    const before = '{\n  "plugins": ["a" "b"]\n}\n'
+    const cli = writeCli(root, before)
+    await assert.rejects(
+      () => wireTui(tree, cli),
+      (e) => e instanceof Error && e.message.includes("[oc-bifrost]") && e.message.includes(cli),
+    )
+    assert.equal(fs.readFileSync(cli, "utf8"), before, "a refused splice must never be written")
   } finally {
     fs.rmSync(root, { recursive: true, force: true })
   }

@@ -23,11 +23,15 @@
  *   - CONCURRENT WRITER. The live client rewrites cli.json itself, so every
  *     write is guarded: the file's mtime is recorded before reading; if it
  *     changed before the write the file is re-read and re-merged - up to 3
- *     attempts, then the module refuses loudly and writes nothing.
+ *     attempts, then the module refuses loudly and writes nothing. The write
+ *     itself is atomic (a same-directory temp file renamed over the target),
+ *     so an interrupt cannot truncate the user's global config.
  *   - AMBIGUITY REFUSES LOUDLY. When the formatting cannot be located
  *     confidently (not a balanced JSONC object, a non-array `plugins` value,
  *     an unbalanced array), the module refuses with an `[oc-bifrost]`-
- *     prefixed message naming the failing path. It never guess-writes.
+ *     prefixed message naming the failing path. It never guess-writes. The
+ *     spliced result is re-tokenized and validated before the write, so a bad
+ *     splice refuses instead of corrupting the file.
  *   - UNWIRE. `unwireTui` removes only what `wireTui` added - entries found
  *     under our own markers, and the whole key it auto-created once the
  *     array is empty again - byte-preserving everything else. Entries that
@@ -39,9 +43,9 @@
  * directory and never writes a path that was not handed to it. Builtins
  * only; zero runtime dependencies.
  */
-import { readFile, stat, writeFile } from "node:fs/promises"
+import { readFile, rename, stat, unlink, writeFile } from "node:fs/promises"
 import { statSync } from "node:fs"
-import { join } from "node:path"
+import { basename, dirname, join } from "node:path"
 import { pathToFileURL } from "node:url"
 
 export const WRAPPER_CONTENT = 'export { default } from "./src/tui/index.tsx";\n'
@@ -384,7 +388,13 @@ function unmergePlugins(text: string, path: string): string | null {
     while (p >= 0 && toks[p]!.kind === "ws") p--
     const prev = toks[p]
     let spanStart = t.start
-    if (prev && prev.kind === "comma") spanStart = prev.start
+    // ONE separator per span. A comma straight before the marker is the
+    // separator we wrote (or the user's dangling comma the restore must
+    // shed); the marker's own line whitespace is ours too. Claiming the
+    // separator on the other side as well would splice out the separator a
+    // surviving user neighbour still needs (M27: `"a" "b"`, unparseable).
+    const ownsLeading = prev !== undefined && prev.kind === "comma"
+    if (ownsLeading) spanStart = prev.start
     else if (prev) spanStart = prev.end
     let spanEnd = t.end
     const candidate = toks[j]
@@ -393,7 +403,9 @@ function unmergePlugins(text: string, path: string): string | null {
       let k = j + 1
       while (k < endIdx && toks[k]!.kind === "ws") k++
       const after = toks[k]
-      if (after && after.kind === "comma") spanEnd = after.end // trailing separator belongs to our element
+      // Entry at the array head has no leading comma, so it owns the trailing
+      // one instead; otherwise the trailing comma stays for the next neighbour.
+      if (after && after.kind === "comma" && !ownsLeading) spanEnd = after.end
       j = k
     }
     // An orphan marker line is removed alone (we own it either way).
@@ -450,6 +462,46 @@ function unmergePlugins(text: string, path: string): string | null {
 }
 
 /**
+ * Strict post-splice validation, run BEFORE the write. The result must still
+ * be one balanced JSONC object, and any `plugins` array it carries must be
+ * comma-separated with no missing or stray separators - so a bad splice can
+ * only ever refuse, never corrupt the user's cli.json (M27's `"a" "b"`).
+ */
+function validateSpliced(text: string, path: string): void {
+  const toks = tokenize(text, path)
+  validateTopObject(text, toks, path)
+  const seg = locatePlugins(toks, path)
+  if (!seg) return
+  const startIdx = indexOfTok(toks, seg.openTok)
+  const endIdx = indexOfTok(toks, seg.closeTok)
+  let expectValue = true
+  for (let i = startIdx + 1; i < endIdx; i++) {
+    const t = toks[i]!
+    if (t.kind === "ws" || t.kind === "comment") continue
+    if (t.kind === "comma") {
+      if (expectValue) refuse(path, `the spliced "plugins" array has a stray or doubled comma`)
+      expectValue = true
+      continue
+    }
+    if (!expectValue) refuse(path, `the spliced "plugins" array is missing a comma between entries`)
+    if (t.kind === "bracket") {
+      // Consume one nested object/array value wholesale.
+      const open = t.text === "{" || t.text === "["
+      if (!open) refuse(path, `the spliced "plugins" array is unbalanced`)
+      let d = 1
+      while (i + 1 < endIdx) {
+        i++
+        const b = toks[i]!
+        if (b.kind === "bracket") d += b.text === "{" || b.text === "[" ? 1 : -1
+        if (d === 0) break
+      }
+      if (d !== 0) refuse(path, `the spliced "plugins" array is unbalanced`)
+    }
+    expectValue = false
+  }
+}
+
+/**
  * Read -> merge/unmerge -> mtime check -> write, re-reading up to 3 attempts
  * when a concurrent writer moves the file between our read and write.
  * Returns true when a write happened.
@@ -475,6 +527,7 @@ async function readMergeWriteStable(
     }
     const next = transform(text)
     if (next === null) return false // nothing to change
+    validateSpliced(next, cliJsonPath)
     if (testSeam?.beforeWrite) await testSeam.beforeWrite()
     const after = await stat(cliJsonPath).catch(() => null)
     if (after === null) refuse(cliJsonPath, "the file disappeared between read and write")
@@ -487,9 +540,15 @@ async function readMergeWriteStable(
       }
       continue
     }
+    // Atomic replace: a temp file in the SAME directory then a rename over the
+    // target, so an interrupt can never leave the user's global config
+    // truncated. The mtime/size race check above still gates the rename.
+    const tmp = join(dirname(cliJsonPath), `.${basename(cliJsonPath)}.oc-bifrost-${process.pid}-${attempt}-${Date.now()}.tmp`)
     try {
-      await writeFile(cliJsonPath, next, "utf8")
+      await writeFile(tmp, next, "utf8")
+      await rename(tmp, cliJsonPath)
     } catch (e) {
+      await unlink(tmp).catch(() => {})
       refuse(cliJsonPath, `cannot write the file: ${e instanceof Error ? e.message : String(e)}`)
     }
     return true

@@ -68,6 +68,21 @@
  *     characters from specs, URLs, archive entry names, or remote responses
  *     are escaped before they reach a message, and a remote body is never
  *     dumped.
+ *   - PROVISIONING (spec §3, Phase 1). After a snapshot materializes and
+ *     BEFORE its entry is imported, its declared dependencies
+ *     (`dependencies` + `peerDependencies`) are provided into
+ *     `<tree>/node_modules` - junctioned from the shared OpenCode npm cache
+ *     root (zero network; `provision: "host"`, the default), with an
+ *     `npm install --no-save` fallback when `provision: "npm"`. Every outcome
+ *     is a loud mount-report row (`provision <pkg> - host:<path>` /
+ *     `npm install --no-save` / `provision refused <pkg> - <reason>` /
+ *     `provision skipped: no package.json`); a refusal under `strict` aborts
+ *     setup. `node_modules` is a DERIVED layer: a marker
+ *     (`<tree>/node_modules/.bifrost-provision.json`) lets every warm load
+ *     re-verify cheaply (per-target realpath re-check + declared-deps drift)
+ *     and re-provision only on drift or staleness; the meta digest never
+ *     covers it. `provision: "off"` is 1.3.x behavior byte-for-byte.
+ *     `OC_BIFROST_PROVISION` sets the mode when the option is omitted.
  *
  * The cache lives in the OpenCode user's shared cache directory
  * (`<XDG_CACHE_HOME>/opencode/oc-bifrost/github/v2/<safe-id>/`, defaulting to
@@ -81,9 +96,11 @@
  */
 import { createHash, randomBytes } from "node:crypto"
 import fs from "node:fs"
+import os from "node:os"
 import path from "node:path"
 import { pathToFileURL } from "node:url"
 import { ArchiveError, readTarGz, type ArchiveFile, type ArchiveContents } from "./archive.js"
+import { provisionTree, type ProvisionAction, type ProvisionReport } from "./provision.js"
 
 /** A parsed `github:` specifier. `ref`/`path` are absent when the spec omits them. */
 export interface GithubSpec {
@@ -152,6 +169,27 @@ export interface GithubResolveOptions {
    * consent.
    */
   trusted?: boolean
+  /**
+   * How a fetched snapshot's declared dependencies are provided before its
+   * entry is imported: `"host"` (the default) junctions each dependency from
+   * the host stores (zero network); `"npm"` adds an `npm install --no-save`
+   * fallback for packages the stores lack; `"off"` keeps 1.3.x behavior
+   * (nothing provisioned, no provision rows). An explicit value wins over the
+   * `OC_BIFROST_PROVISION` environment variable; an invalid value is a loud
+   * refusal.
+   */
+  provision?: ProvisionMode
+  /**
+   * True turns a provisioning REFUSAL into a thrown refusal (the setup-abort
+   * pattern; false records the refusal as a loud row and the mount proceeds).
+   */
+  strict?: boolean
+  /**
+   * Host-store roots probed in order for each declared dependency. Defaults to
+   * the shared OpenCode npm cache root (`<XDG_CACHE_HOME or ~/.cache>/
+   * opencode/npm`); tests inject temp stores.
+   */
+  hostStores?: readonly string[]
   /** Injectable fetch for tests; defaults to `globalThis.fetch`. */
   fetchImpl?: FetchLike
   timeoutMs?: number
@@ -162,7 +200,7 @@ export interface GithubResolveOptions {
 }
 
 export interface GithubResolveResult {
-  /** `file://` URL of the verified cached entry module — the import target. */
+  /** `file://` URL of the verified cached entry module - the import target. */
   url: string
   cacheDir: string
   meta: GithubMeta
@@ -170,6 +208,14 @@ export interface GithubResolveResult {
   fetched: boolean
   /** Load-time warnings that belong in the mount note (never silent). */
   warnings?: string[]
+  /**
+   * Provision rows for the mount note (`provision <pkg> - host:<path>`,
+   * `... npm install --no-save`, `provision refused <pkg> - <reason>`,
+   * `provision skipped: no package.json`). Present only when provisioning
+   * actually ran this cycle (a first fetch, or a warm re-provision on marker
+   * drift/staleness) and is not `"off"`.
+   */
+  provision?: string[]
 }
 
 /** Structural subset of a streaming response body, for the incremental size cap. */
@@ -496,6 +542,248 @@ export function remoteTrustEnabled(option: boolean | undefined, env: NodeJS.Proc
   return String(env?.OC_BIFROST_TRUST ?? "").trim().toLowerCase() === "github"
 }
 
+/** How a fetched tree's declared dependencies are provided (spec §3). */
+export type ProvisionMode = "host" | "npm" | "off"
+
+/**
+ * The provisioning mode. An explicit option wins over the env var; omitted,
+ * `OC_BIFROST_PROVISION` decides; unset, the default is `"host"`. Any other
+ * value is a loud refusal (a typo must never silently disable provisioning).
+ * Pure.
+ */
+export function provisionMode(option: ProvisionMode | undefined, env: NodeJS.ProcessEnv = process.env): ProvisionMode {
+  const raw = option !== undefined ? String(option) : env?.OC_BIFROST_PROVISION
+  const value = String(raw ?? "").trim().toLowerCase()
+  if (value === "host" || value === "npm" || value === "off") return value
+  if (value === "") return "host"
+  fail(
+    `invalid provision mode "${safe(raw ?? "")}": expected "host", "npm", or "off" ` +
+      `(options.provision, or the OC_BIFROST_PROVISION environment variable)`,
+  )
+}
+
+/**
+ * The default host-store root: the shared OpenCode npm cache - the `npm`
+ * SIBLING of the bridge's own `oc-bifrost` cache dir under the same
+ * `<XDG_CACHE_HOME or ~/.cache>/opencode` base `githubCacheRoot` derives from
+ * (controller ruling R-2; the `oc-bifrost` dir itself is a known-wrong guess).
+ * Live layout: `<root>/<name>@<version>/<cacheId>/node_modules/<name>`.
+ */
+export function defaultHostStoreRoot(
+  homeDirectory = os.homedir(),
+  env: NodeJS.ProcessEnv = process.env,
+): string {
+  const cacheHome = env.XDG_CACHE_HOME || path.join(homeDirectory, ".cache")
+  return path.join(cacheHome, "opencode", "npm")
+}
+
+/**
+ * The declared dependency names of a materialized tree - the union of
+ * `dependencies` and `peerDependencies` keys, deduped, in declaration order.
+ * Null when there is no readable, parseable manifest (a malformed manifest
+ * conflates with a missing one, per controller ruling M5).
+ */
+function readDeclaredDeps(treeDir: string): string[] | null {
+  let raw: string
+  try {
+    raw = fs.readFileSync(path.join(treeDir, "package.json"), "utf8")
+  } catch {
+    return null
+  }
+  let parsed: unknown
+  try {
+    parsed = JSON.parse(raw)
+  } catch {
+    return null
+  }
+  if (parsed === null || typeof parsed !== "object") return null
+  const record = parsed as Record<string, unknown>
+  const declared: string[] = []
+  for (const field of ["dependencies", "peerDependencies"] as const) {
+    const value = record[field]
+    if (value !== null && typeof value === "object") {
+      for (const key of Object.keys(value as Record<string, unknown>)) {
+        if (!declared.includes(key)) declared.push(key)
+      }
+    }
+  }
+  return declared
+}
+
+/**
+ * The provisioning marker (`<tree>/node_modules/.bifrost-provision.json`):
+ * the dep set the marker COVERS plus one entry per action with its source and
+ * target. It is a derived-layer record - never digested, never trusted for
+ * identity; the sha256/metadata still pin the fetched tree (spec §3).
+ */
+interface ProvisionMarker {
+  version: 1
+  deps: string[]
+  actions: ProvisionAction[]
+}
+
+const PROVISION_MARKER_FILENAME = ".bifrost-provision.json"
+
+/** Read and shape-check the marker; null when absent or in any way damaged. */
+function readMarker(treeDir: string): ProvisionMarker | null {
+  let raw: string
+  try {
+    raw = fs.readFileSync(path.join(treeDir, "node_modules", PROVISION_MARKER_FILENAME), "utf8")
+  } catch {
+    return null
+  }
+  let parsed: unknown
+  try {
+    parsed = JSON.parse(raw)
+  } catch {
+    return null
+  }
+  if (parsed === null || typeof parsed !== "object") return null
+  const record = parsed as Record<string, unknown>
+  if (record.version !== 1) return null
+  const deps = record.deps
+  const actions = record.actions
+  if (!Array.isArray(deps) || !deps.every((dep) => typeof dep === "string")) return null
+  if (!Array.isArray(actions)) return null
+  for (const entry of actions) {
+    if (entry === null || typeof entry !== "object") return null
+    const action = entry as Record<string, unknown>
+    if (typeof action.package !== "string" || typeof action.target !== "string") return null
+    if (action.source !== "host" && action.source !== "npm" && action.source !== "skip") return null
+  }
+  return { version: 1, deps: deps as string[], actions: actions as ProvisionAction[] }
+}
+
+/** True when `p` is a REAL directory (never a reparse point) - lstat, never follows. */
+function isRealDirectory(p: string): boolean {
+  let stats: fs.Stats
+  try {
+    stats = fs.lstatSync(p)
+  } catch {
+    return false
+  }
+  return !stats.isSymbolicLink() && stats.isDirectory()
+}
+
+/** True when `p` is a link (junction on Windows, symlink elsewhere). */
+function isLink(p: string): boolean {
+  try {
+    return fs.lstatSync(p).isSymbolicLink()
+  } catch {
+    return false
+  }
+}
+
+/** Remove a LINK only (junction/symlink - never a real directory, never recursive). */
+function removeLink(p: string): boolean {
+  try {
+    fs.rmdirSync(p)
+    return true
+  } catch {
+    // fall through to unlink (POSIX symlinks are files to the fs layer)
+  }
+  try {
+    fs.unlinkSync(p)
+    return true
+  } catch {
+    return false
+  }
+}
+
+/** Write the marker only when a provision actually took actions. */
+function writeMarker(treeDir: string, report: ProvisionReport): void {
+  const marker: ProvisionMarker = {
+    version: 1,
+    deps: report.actions.map((action) => action.package),
+    actions: report.actions.map((action) => ({ package: action.package, source: action.source, target: action.target })),
+  }
+  try {
+    atomicWrite(path.join(treeDir, "node_modules", PROVISION_MARKER_FILENAME), `${JSON.stringify(marker, null, 2)}\n`)
+  } catch (error) {
+    fail(
+      `could not write the provision marker at ${safe(path.join(treeDir, "node_modules", PROVISION_MARKER_FILENAME))}: ` +
+        `${safe((error as Error).message, 200)}; node_modules is a derived layer - delete the cache directory to re-fetch`,
+    )
+  }
+}
+
+/** The mechanism-naming reason for a provision refusal, per mode. */
+function provisionRefusalReason(mode: ProvisionMode): string {
+  return mode === "npm"
+    ? "no host-store hit and npm install --no-save failed"
+    : 'no host-store hit (npm fallback is off; to enable it set provision: "npm")'
+}
+
+/** The one-line refusal row text (matches the strict throw). */
+function provisionRow(name: string, mode: ProvisionMode): string {
+  return `provision refused ${name} - ${provisionRefusalReason(mode)}`
+}
+
+/** The mount-report rows for one provision pass. */
+function provisionRows(report: ProvisionReport, mode: ProvisionMode): string[] {
+  const rows: string[] = []
+  for (const action of report.actions) {
+    if (action.source === "host") rows.push(`provision ${action.package} - host:${safe(action.target)}`)
+    else if (action.source === "npm") rows.push(`provision ${action.package} - npm install --no-save`)
+    // "skip" is status quo, not an event: no row.
+  }
+  for (const name of report.refused) rows.push(provisionRow(name, mode))
+  return rows
+}
+
+/**
+ * The warm-reload counterpart of provisioning (spec §3): the marker written at
+ * provision time lets every load re-verify the derived layer CHEAPLY - a
+ * per-target realpath re-check (a store that moves leaves its junctions stale)
+ * and a declared-deps drift check. A coherent marker means zero work and zero
+ * re-provisioning; drift, a stale target, or a missing marker re-provisions
+ * (idempotent for what is present, zero network while host hits last) and
+ * rewrites the marker. Anything still refused is a loud row - and, under
+ * `strict`, a throw.
+ */
+async function verifyProvisionedTree(treeDir: string, opts: GithubResolveOptions): Promise<string[]> {
+  const mode = provisionMode(opts.provision, process.env)
+  if (mode === "off") return []
+  const declared = readDeclaredDeps(treeDir)
+  if (declared === null) return [] // nothing declares anything: nothing to verify
+  const marker = readMarker(treeDir)
+  const rows: string[] = []
+  if (marker !== null && !declared.some((dep) => !marker.deps.includes(dep))) {
+    // The marker covers every declared dep: the cheap realpath re-check is
+    // the whole re-verification. Coherent -> zero work, zero network.
+    if (!marker.actions.some((action) => !isRealDirectory(action.target))) return []
+    // At least one target went stale (a store moved, a package was removed):
+    // fall through and re-provision.
+  }
+  // Remove every stale link the marker knows about BEFORE re-provisioning, so
+  // provisionTree's presence check can never mistake a dead junction for a
+  // skip. The marker is a derived-layer record: its names are validated the
+  // same way provisionTree validates them - a marker that names an escaping
+  // path is refused out loud, never followed.
+  if (marker !== null) {
+    for (const action of marker.actions) {
+      if (isRealDirectory(action.target)) continue
+      const dest = path.join(treeDir, "node_modules", ...action.package.split("/"))
+      const rel = path.relative(treeDir, dest)
+      if (rel === "" || rel.startsWith("..") || path.isAbsolute(rel)) {
+        rows.push(`provision refused ${safe(action.package)} - a stale junction target could not be identified safely`)
+        continue
+      }
+      if (isLink(dest) && !removeLink(dest)) {
+        rows.push(`provision refused ${safe(action.package)} - a stale junction could not be replaced (locked or write-protected)`)
+      }
+    }
+  }
+  const report = await provisionTree(treeDir, {
+    hostStores: opts.hostStores ?? [defaultHostStoreRoot()],
+    npm: mode === "npm",
+  })
+  rows.push(...provisionRows(report, mode))
+  if (report.actions.length > 0) writeMarker(treeDir, report)
+  if (opts.strict === true && report.refused.length > 0) fail(provisionRow(report.refused[0] as string, mode))
+  return rows
+}
+
 /**
  * The informed-consent refusal for a cold cache. Names exactly what is about
  * to be fetched, that it will execute with the host process's full user
@@ -701,7 +989,7 @@ function entryFileFor(cacheDir: string, meta: GithubMeta): string {
 }
 
 /** Cache-hit path: verify identity, type, and bytes, then hand over the URL. */
-function loadVerified(spec: GithubSpec, cacheDir: string): GithubResolveResult {
+async function loadVerified(spec: GithubSpec, cacheDir: string, opts: GithubResolveOptions): Promise<GithubResolveResult> {
   const metaFile = path.join(cacheDir, META_FILENAME)
   checkCacheFile(metaFile, "provenance record")
   const meta = readProvenance(cacheDir)
@@ -720,7 +1008,7 @@ function loadVerified(spec: GithubSpec, cacheDir: string): GithubResolveResult {
     fail(
       `refusing to load "${safe(githubLabel(spec))}": the cache at ${safe(cacheDir)} holds a provenance record ` +
         `but its entry file is unreadable (${safe((error as Error).message)}). ` +
-        `Delete the cache directory to re-fetch — a broken cache is never silently re-fetched`,
+        `Delete the cache directory to re-fetch - a broken cache is never silently re-fetched`,
     )
   }
   const actual = sha256BytesHex(cached)
@@ -732,7 +1020,17 @@ function loadVerified(spec: GithubSpec, cacheDir: string): GithubResolveResult {
         `inspect and delete the cache directory to re-fetch`,
     )
   }
-  return { url: pathToFileURL(entryFile).href, cacheDir, meta, fetched: false }
+  const provision: string[] = []
+  if (meta.layout === "snapshot") {
+    provision.push(...(await verifyProvisionedTree(path.join(cacheDir, TREE_DIRNAME), opts)))
+  }
+  return {
+    url: pathToFileURL(entryFile).href,
+    cacheDir,
+    meta,
+    fetched: false,
+    ...(provision.length > 0 ? { provision } : {}),
+  }
 }
 
 /** Resolve the repository's default branch. Any failure is loud and suggests the fix. */
@@ -1187,9 +1485,12 @@ async function fetchAndRecord(
   }
 
   const metaFile = path.join(cacheDir, META_FILENAME)
+  const provisionModeValue = provisionMode(opts.provision, process.env)
+  const provisionRowsWritten: string[] = []
+  let provisionRefused: string[] = []
   try {
     // The boundary was validated before the fetch; re-validate now that the
-    // entry exists, immediately before any write — the no-follow shrink of
+    // entry exists, immediately before any write - the no-follow shrink of
     // the race window (see validateCachePath).
     validateCacheLevels(opts.cacheRoot, githubCacheLayoutRoot(opts.cacheRoot), cacheDir)
     fs.mkdirSync(cacheDir, { recursive: true, mode: 0o700 })
@@ -1197,6 +1498,31 @@ async function fetchAndRecord(
       materializeSnapshot(cacheDir, snapshot.files as ArchiveFile[])
     } else {
       atomicWrite(entryFile, singleContent)
+    }
+    // PROVISIONING (spec §3): the fetched tree declared its dependencies in
+    // its manifest; junction them from the host stores (zero network) or, per
+    // the provision option, install with npm - BEFORE the entry's first
+    // import, with every outcome a loud mount-report row. Only fetched trees
+    // are provisioned; local and preset entries never reach this path.
+    if (provisionModeValue !== "off") {
+      if (meta.layout !== "snapshot") {
+        provisionRowsWritten.push("provision skipped: no package.json")
+      } else {
+        const treeDir = path.join(cacheDir, TREE_DIRNAME)
+        const declared = readDeclaredDeps(treeDir)
+        if (declared === null) {
+          // Missing OR malformed manifest (M5): same loud row, still mounts.
+          provisionRowsWritten.push("provision skipped: no package.json")
+        } else {
+          const report = await provisionTree(treeDir, {
+            hostStores: opts.hostStores ?? [defaultHostStoreRoot()],
+            npm: provisionModeValue === "npm",
+          })
+          provisionRowsWritten.push(...provisionRows(report, provisionModeValue))
+          provisionRefused = report.refused
+          if (report.actions.length > 0) writeMarker(treeDir, report)
+        }
+      }
     }
     atomicWrite(metaFile, `${JSON.stringify(meta, null, 2)}\n`)
     try {
@@ -1233,10 +1559,22 @@ async function fetchAndRecord(
     }
     fail(
       `could not write the github: cache at ${safe(cacheDir)}: ${safe((error as Error).message, 400)}; ` +
-        `partial state was removed — nothing will be executed from an incomplete cache`,
+        `partial state was removed - nothing will be executed from an incomplete cache`,
     )
   }
-  return { url: pathToFileURL(entryFile).href, cacheDir, meta, fetched: true, warnings }
+  // A provision refusal is a completed cache, not a write failure: the refusal
+  // row is the report; under strict it aborts SETUP here (the caller's
+  // warn-and-throw pattern), leaving the provisioned cache intact for a later
+  // non-strict load.
+  if (opts.strict === true && provisionRefused.length > 0) fail(provisionRow(provisionRefused[0] as string, provisionModeValue))
+  return {
+    url: pathToFileURL(entryFile).href,
+    cacheDir,
+    meta,
+    fetched: true,
+    warnings,
+    ...(provisionRowsWritten.length > 0 ? { provision: provisionRowsWritten } : {}),
+  }
 }
 
 /**
@@ -1266,7 +1604,7 @@ export async function resolveGithubPlugin(
   // A directory-named plugin.ts/meta.json is NOT a cached entry: it routes to
   // the cold path, whose write then fails and rolls back (fail closed) -
   // while real files and links route to the verify path, which refuses links.
-  if (isEntryFile(pluginFile) || isEntryFile(metaFile)) return loadVerified(spec, cacheDir)
+  if (isEntryFile(pluginFile) || isEntryFile(metaFile)) return loadVerified(spec, cacheDir, opts)
   if (opts.trusted !== true) fail(consentMessage(spec))
   const existing = inflightFetches.get(cacheDir)
   if (existing !== undefined) return existing

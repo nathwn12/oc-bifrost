@@ -222,6 +222,8 @@ export default Plugin.define({
           gh = await resolveGithubPlugin(resolved.spec, {
             cacheRoot: githubCacheRoot(),
             trusted: remoteTrustEnabled(options.trustRemote, process.env),
+            provision: options.provision,
+            strict: options.strict,
           })
         } catch (error) {
           reporter.warn((error as Error).message)
@@ -230,11 +232,11 @@ export default Plugin.define({
         }
         specifier = gh.url
         // Always names the resolved commit, the layout (repository snapshot or
-        // the loud single-file fallback), the digest, and the host-rights
-        // reality — the consent stays informed on every later load. Load-time
-        // warnings (e.g. an ignored pre-snapshot cache) ride in the same note,
-        // so nothing is silent.
-        githubNote = [mountNote(gh.meta, gh.fetched), ...(gh.warnings ?? [])].join("; ")
+        // the loud single-file fallback), the digest, the provision rows, and
+        // the host-rights reality - the consent stays informed on every later
+        // load. Load-time warnings (e.g. an ignored pre-snapshot cache) ride
+        // in the same note, so nothing is silent.
+        githubNote = [mountNote(gh.meta, gh.fetched), ...(gh.warnings ?? []), ...(gh.provision ?? [])].join("; ")
       } else {
         specifier = resolved.url
       }

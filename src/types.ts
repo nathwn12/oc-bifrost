@@ -37,12 +37,23 @@ export interface BifrostOptions {
    * Explicit informed consent for `github:` specs to fetch and execute remote
    * code on FIRST use. A cold cache refuses to fetch unless this is true or
    * the environment sets `OC_BIFROST_TRUST=github`; an explicit `false` wins
-   * over the env var. A warm (hash-verified) cache loads without consent —
+   * over the env var. A warm (hash-verified) cache loads without consent -
    * the opt-in is about the first fetch, not every mount. The refusal names
    * what would be fetched and that it executes with the host process's full
    * user rights.
    */
   trustRemote?: boolean
+  /**
+   * How a fetched `github:` snapshot's declared dependencies are provided
+   * before its entry is imported: `"host"` (the default) junctions each
+   * dependency from the shared OpenCode npm cache
+   * (`<XDG_CACHE_HOME or ~/.cache>/opencode/npm`) - zero network; `"npm"`
+   * adds an `npm install --no-save` fallback for packages the host store
+   * lacks; `"off"` is 1.3.x behavior (no provisioning, no provision rows).
+   * An explicit value here wins over the `OC_BIFROST_PROVISION` environment
+   * variable; an invalid value is a loud refusal.
+   */
+  provision?: "host" | "npm" | "off"
 }
 
 export type SupportLevel = "full" | "partial" | "unsupported" | "mounted"

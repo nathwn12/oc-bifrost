@@ -47,6 +47,16 @@
  *     materialization leaves no partial tree. On load, every directory between
  *     the cache entry and the entry file is re-checked as a real directory,
  *     never a symlink.
+ *   - FIRST FETCHES ARE SERIALIZED PER CACHE ENTRY. Concurrent
+ *     resolveGithubPlugin calls for the same spec (the host can activate the
+ *     same configured package from several locations at once) share ONE
+ *     fetch/materialize promise: a second pass awaiting the first can never
+ *     observe the mid-write gap between the tree rename and the provenance
+ *     write, so the "never overwrite an incomplete cache" refusal and its
+ *     rollback (which would delete the first pass's partial state) never
+ *     fire against a live sibling pass. A settled fetch clears the entry, so
+ *     a later load behaves as before: warm cache hit, or a fresh retry after
+ *     a failure.
  *   - VERIFICATION IS DRIFT DETECTION, NOT A DEFENSE AGAINST A LOCAL
  *     ADVERSARY. The digest lives beside the file it pins (meta.json in the
  *     same directory), so same-user malware can rewrite both. It catches
@@ -193,6 +203,22 @@ export type FetchLike = (
 
 const GITHUB_SPEC_PATTERN =
   /^github:([^/@#\s]+)\/([^/@#\s]+)(?:@([^#\s]+))?(?:#(\S+))?$/
+
+/**
+ * First-fetch serialization. Two concurrent resolveGithubPlugin calls for the
+ * same cache entry must never run two fetchAndRecord passes against the same
+ * cache directory: pass B can land mid-materialization, see `tree` without a
+ * provenance record, fire the "never overwrite an incomplete cache" refusal,
+ * and its rollback then REMOVES the partial state pass A is still writing -
+ * so every reload re-fetches and the mount never completes. Keyed by the
+ * fully derived cache directory (the cache id under its layout root), so
+ * each in-flight first fetch is shared by every caller for that entry and
+ * distinct roots never share a slot. A settled promise (fulfilled OR
+ * rejected) removes the entry: a warm cache then serves later loads with
+ * zero network and a failure leaves the next attempt free to retry exactly
+ * like today.
+ */
+const inflightFetches = new Map<string, Promise<GithubResolveResult>>()
 
 const GITHUB_PLUGIN_FILENAME = "plugin.ts"
 const META_FILENAME = "meta.json"
@@ -1217,11 +1243,16 @@ async function fetchAndRecord(
  * Resolve a `github:` spec to an importable `file://` URL.
  *
  * Order: the cache-path boundary (root and entry must be absent or real
- * directories, realpath-contained — before ANY fetch or write) → cache hit
+ * directories, realpath-contained - before ANY fetch or write) -> cache hit
  * (file types checked, provenance-checked, entry hash-verified, zero network)
- * → consent gate (cold + unconsented refuses BEFORE any fetch) → consented
- * first fetch (ref → commit → repository snapshot by commit, single-file
+ * -> consent gate (cold + unconsented refuses BEFORE any fetch) -> consented
+ * first fetch (ref -> commit -> repository snapshot by commit, single-file
  * fallback with a loud note, atomic cache write with rollback).
+ *
+ * The cold path is serialized per cache entry: a concurrent caller for the
+ * same spec awaits the SAME fetch/materialize promise instead of starting
+ * its own pass, so no second pass can ever observe (and roll back) the
+ * first pass's mid-write cache state.
  */
 export async function resolveGithubPlugin(
   spec: GithubSpec,
@@ -1233,9 +1264,17 @@ export async function resolveGithubPlugin(
   const pluginFile = path.join(cacheDir, GITHUB_PLUGIN_FILENAME)
   const metaFile = path.join(cacheDir, META_FILENAME)
   // A directory-named plugin.ts/meta.json is NOT a cached entry: it routes to
-  // the cold path, whose write then fails and rolls back (fail closed) —
+  // the cold path, whose write then fails and rolls back (fail closed) -
   // while real files and links route to the verify path, which refuses links.
   if (isEntryFile(pluginFile) || isEntryFile(metaFile)) return loadVerified(spec, cacheDir)
   if (opts.trusted !== true) fail(consentMessage(spec))
-  return fetchAndRecord(spec, cacheDir, opts)
+  const existing = inflightFetches.get(cacheDir)
+  if (existing !== undefined) return existing
+  const promise = fetchAndRecord(spec, cacheDir, opts).finally(() => {
+    // The map holds at most one promise per key - the one this call created -
+    // so a settled fetch always clears its own entry.
+    inflightFetches.delete(cacheDir)
+  })
+  inflightFetches.set(cacheDir, promise)
+  return promise
 }

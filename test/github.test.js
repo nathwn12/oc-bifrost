@@ -134,6 +134,20 @@ function fakeFetch({
   return impl
 }
 
+/**
+ * Wrap a fakeFetch so every codeload tarball response waits on a gate
+ * promise first. Lets a test hold the first pass mid-fetch (between its
+ * tarball download and its cache write) while a second pass starts.
+ */
+function gatedFetch(base, gate) {
+  const impl = async (url, init) => {
+    if (url.startsWith("https://codeload.github.com/")) await gate
+    return base(url, init)
+  }
+  impl.calls = base.calls
+  return impl
+}
+
 const SPECS = {
   bare: { owner: "obra", repo: "superpowers" },
   full: { owner: "rtk-ai", repo: "rtk", ref: "v0.50.0", path: "hooks/opencode/rtk.ts" },
@@ -382,6 +396,54 @@ test("resolveGithubPlugin: a cold cache WITH opt-in fetches the repository SNAPS
       false,
       "a successful snapshot must never hit the raw surface",
     )
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true })
+  }
+})
+
+test("resolveGithubPlugin: CONCURRENT first fetches for the same spec share ONE codeload fetch (no race on the shared cache)", async () => {
+  const root = tmpRoot()
+  try {
+    let releaseGate
+    const gate = new Promise((resolve) => {
+      releaseGate = resolve
+    })
+    const impl = gatedFetch(fakeFetch({ tree: TREE }), gate)
+    const options = { cacheRoot: root, fetchImpl: impl, trusted: true, now: () => new Date(0) }
+    const run = Promise.all([resolveGithubPlugin(SPECS.bare, options), resolveGithubPlugin(SPECS.bare, options)])
+    // Both callers are in flight before the tarball response is released, so
+    // the second pass must be awaiting the first pass's fetch/materialize
+    // promise rather than entering its own fetchAndRecord mid-write.
+    await new Promise((resolve) => setImmediate(resolve))
+    releaseGate()
+    const [first, second] = await run
+
+    assert.equal(first.fetched, true)
+    assert.equal(second.fetched, true, "both passes observe the fetch this cycle")
+    assert.equal(second.url, first.url)
+    assert.equal(second.meta.sha256, first.meta.sha256)
+    assert.equal(
+      impl.calls.filter((call) => call.url.startsWith("https://codeload.github.com/")).length,
+      1,
+      "concurrent passes must share exactly ONE codeload fetch",
+    )
+    assert.equal(
+      impl.calls.filter((call) => call.url.startsWith("https://api.github.com/")).length,
+      2,
+      "ref resolution runs once (default branch + commit)",
+    )
+
+    // Provenance written once and complete: the cache is warm and the next
+    // load is a zero-network verified hit (a torn first fetch would have
+    // refused and left no usable cache).
+    const cacheDir = cacheDirFor(root, SPECS.bare)
+    const meta = JSON.parse(fs.readFileSync(path.join(cacheDir, "meta.json"), "utf8"))
+    assert.equal(meta.layout, "snapshot")
+    assert.equal(meta.sha256, sha256Hex(SRC))
+    assert.equal(fs.readFileSync(path.join(cacheDir, "tree", "hooks", "opencode", "superpowers.ts"), "utf8"), SRC)
+    const reload = await resolveGithubPlugin(SPECS.bare, { cacheRoot: root, fetchImpl: noNetwork(), trusted: true })
+    assert.equal(reload.fetched, false)
+    assert.equal(reload.url, first.url)
   } finally {
     fs.rmSync(root, { recursive: true, force: true })
   }

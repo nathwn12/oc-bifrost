@@ -44,3 +44,12 @@ One OpenCode V2 plugin (`src/index.ts`) that imports plugin modules of any era a
 ```sh
 npm run check     # typecheck + build + tests
 ```
+
+## Workflow standard (owner directive, 2026-09-30)
+
+- Work in this checkout on `main`. No worktrees for this repo; a paused feature branch is kept as a branch, not a working copy.
+- The agent owns the whole git ceremony: commits, pushes, PRs, merges, approvals, version bumps, CHANGELOG, VERIFIED-PLUGINS rows, and live-config edits (always via `scripts/backup-config.ps1` backups).
+- The owner's only manual step is `npm publish`.
+- Keep the checkout current: `git fetch origin --prune` and `--ff-only` sync `main` with `origin/main` before and after work; never leave it stale.
+- Release flow: land the fix on `main` -> `npm run check` green -> bump the version in `package.json`/`package-lock.json` + CHANGELOG + pins -> push to `main` -> owner runs `npm publish` -> update the live pin -> verify live from logs.
+- No local glue: never hand-create junctions, hand-edit `cli.json`, or point configs at cache copies to work around a product gap; fix the product instead.

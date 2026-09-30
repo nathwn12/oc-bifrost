@@ -3,7 +3,8 @@ import assert from "node:assert/strict"
 import os from "node:os"
 import path from "node:path"
 import { pathToFileURL } from "node:url"
-import { resolveSpec } from "../dist/index.js"
+import { githubCacheRoot, resolveSpec } from "../dist/index.js"
+import { defaultHostStoreRoot } from "../dist/github.js"
 
 const DIR = path.resolve("some", "session", "dir")
 
@@ -61,4 +62,20 @@ test("resolveSpec: preset:rtk resolves to the rtk preset", () => {
 test("resolveSpec: unknown preset fails loudly with the valid ids", () => {
   assert.throws(() => resolveSpec("preset:nope", DIR), /nope/)
   assert.throws(() => resolveSpec("preset:nope", DIR), /rtk/)
+})
+
+test("defaultHostStoreRoot: the npm SIBLING of the oc-bifrost cache under the shared opencode cache root", () => {
+  const home = path.join(os.tmpdir(), "oc-bifrost-home-test")
+  const plain = path.join(home, ".cache", "opencode")
+  assert.equal(defaultHostStoreRoot(home, {}), path.join(plain, "npm"))
+  const xdg = path.join(home, "xdg-cache")
+  assert.equal(defaultHostStoreRoot(home, { XDG_CACHE_HOME: xdg }), path.join(xdg, "opencode", "npm"))
+  // Ruling R-2: the store root is the cache root's npm SIBLING - derived from
+  // the same base as githubCacheRoot - NOT github's parent (the oc-bifrost
+  // dir itself, the known-wrong guess the plan file was corrected against).
+  assert.equal(
+    path.join(path.dirname(path.dirname(githubCacheRoot(home, {}))), "npm"),
+    path.join(plain, "npm"),
+  )
+  assert.notEqual(defaultHostStoreRoot(home, {}), path.dirname(githubCacheRoot(home, {})))
 })

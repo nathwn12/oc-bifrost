@@ -15,6 +15,7 @@ import {
   githubLabel,
   mountNote,
   parseGithubSpec,
+  provisionMode,
   remoteTrustEnabled,
   resolveGithubPlugin,
   sha256Hex,
@@ -1159,9 +1160,314 @@ test("mountNote: a single-file fallback says the loss out loud on every load", (
     snapshotFallback: "the tarball of obra/superpowers at commit … exceeded the 16 MiB download cap",
   }
   const fetched = mountNote(single, true)
-  assert.match(fetched, /as a SINGLE FILE — the repository snapshot was not used/)
+  assert.match(fetched, /as a SINGLE FILE \u2014 the repository snapshot was not used/)
   assert.match(fetched, /sibling files are NOT available, and a plugin that reads them by relative path is inert/)
   assert.match(fetched, new RegExp(`exceeded the 16 MiB download cap`))
   const warm = mountNote(single, false)
-  assert.match(warm, /SINGLE FILE — sibling files are NOT available and a plugin that reads them by relative path is inert/)
+  assert.match(warm, /SINGLE FILE \u2014 sibling files are NOT available and a plugin that reads them by relative path is inert/)
+})
+
+/* ---- provisioning the fetched tree (Phase 1 wiring) ---- */
+
+/** A snapshot that declares one dependency, with an ESM entry importing it. */
+const PROVISIONED_PATH = "hooks/opencode/superpowers.mjs"
+const SPEC_PROVISIONED = { owner: "obra", repo: "superpowers", path: PROVISIONED_PATH }
+const PROVISION_TREE = {
+  "package.json": JSON.stringify({ name: "fixture", version: "1.0.0", dependencies: { "demo-dep": "1.0.0" } }),
+  [PROVISIONED_PATH]: 'import { tag } from "demo-dep"\nexport default { id: "demo", setup() {}, tag }\n',
+}
+
+/** A fake host-store package at `<storeRoot>/<name>` (flat layout (a)). */
+function writeStorePackage(storeRoot, name, files) {
+  const dir = path.join(storeRoot, name)
+  fs.mkdirSync(dir, { recursive: true })
+  for (const [fileName, content] of Object.entries(files)) {
+    fs.writeFileSync(path.join(dir, fileName), content)
+  }
+  return dir
+}
+
+const DEMO_DEP = {
+  "package.json": JSON.stringify({ name: "demo-dep", version: "1.0.0", type: "module" }),
+  "index.js": 'export const tag = "provisioned"\n',
+}
+
+/** A fake `npm` on PATH that exits with `exitCode` (mirrors test/provision.test.js). */
+function setFakeNpm(shimDir, exitCode) {
+  fs.mkdirSync(shimDir, { recursive: true })
+  if (process.platform === "win32") {
+    fs.writeFileSync(path.join(shimDir, "npm.cmd"), `@echo off\nexit /b ${exitCode}\r\n`)
+  } else {
+    fs.writeFileSync(path.join(shimDir, "npm"), `#!/bin/sh\nexit ${exitCode}\n`, { mode: 0o755 })
+  }
+}
+
+test("provisionMode: an explicit option wins over the env; host is the default; invalid values refuse loudly", () => {
+  assert.equal(provisionMode("off", { OC_BIFROST_PROVISION: "npm" }), "off", "an explicit option wins over the env")
+  assert.equal(provisionMode("npm", {}), "npm")
+  assert.equal(provisionMode("host", {}), "host")
+  assert.equal(provisionMode(undefined, { OC_BIFROST_PROVISION: "npm" }), "npm")
+  assert.equal(provisionMode(undefined, { OC_BIFROST_PROVISION: " HOST " }), "host", "env values are trimmed and lowercased")
+  assert.equal(provisionMode(undefined, {}), "host", "the default is host")
+  assert.equal(provisionMode(undefined, { OC_BIFROST_PROVISION: "" }), "host")
+  assert.throws(() => provisionMode(undefined, { OC_BIFROST_PROVISION: "naspm" }), /invalid provision mode "naspm"/)
+  assert.throws(() => provisionMode(undefined, { OC_BIFROST_PROVISION: "github" }), /expected "host", "npm", or "off"/)
+})
+
+test("resolveGithubPlugin: cold fetch provisions the tree's declared deps from the host store and the entry now imports", async () => {
+  const root = tmpRoot()
+  try {
+    const storeRoot = path.join(root, "store")
+    const source = writeStorePackage(storeRoot, "demo-dep", DEMO_DEP)
+    const impl = fakeFetch({ tree: PROVISION_TREE })
+    const result = await resolveGithubPlugin(SPEC_PROVISIONED, {
+      cacheRoot: root,
+      fetchImpl: impl,
+      trusted: true,
+      hostStores: [storeRoot],
+    })
+    assert.equal(result.fetched, true)
+    assert.ok(result.provision, "the provision rows must be present")
+    assert.ok(
+      result.provision.includes(`provision demo-dep - host:${source}`),
+      `rows: ${JSON.stringify(result.provision)}`,
+    )
+    assert.ok(result.provision.some((row) => !row.startsWith("provision refused")), "no dep may be refused")
+
+    const cacheDir = cacheDirFor(root, SPEC_PROVISIONED)
+    const dest = path.join(cacheDir, "tree", "node_modules", "demo-dep")
+    const stats = fs.lstatSync(dest)
+    assert.equal(stats.isSymbolicLink(), true, "the provisioned dep must be a link (junction on Windows)")
+    assert.equal(
+      fs.readFileSync(path.join(dest, "package.json"), "utf8"),
+      DEMO_DEP["package.json"],
+      "the tree-local path must resolve through the junction to the host package",
+    )
+
+    const marker = JSON.parse(
+      fs.readFileSync(path.join(cacheDir, "tree", "node_modules", ".bifrost-provision.json"), "utf8"),
+    )
+    assert.equal(marker.version, 1, "the marker must carry the marker contract version")
+    assert.deepEqual(marker.deps, ["demo-dep"], "the marker must list the provisioned dep set")
+    assert.deepEqual(marker.actions, [{ package: "demo-dep", source: "host", target: source }])
+
+    const module = await import(result.url)
+    assert.equal(module.default.tag, "provisioned", "the entry must import its provisioned dependency (the run-B mirror)")
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true })
+  }
+})
+
+test("resolveGithubPlugin: provision \"off\" provisions nothing and the as-fetched import refusal is preserved", async () => {
+  const root = tmpRoot()
+  try {
+    const storeRoot = path.join(root, "store")
+    writeStorePackage(storeRoot, "demo-dep", DEMO_DEP)
+    const impl = fakeFetch({ tree: PROVISION_TREE })
+    const result = await resolveGithubPlugin(SPEC_PROVISIONED, {
+      cacheRoot: root,
+      fetchImpl: impl,
+      trusted: true,
+      provision: "off",
+    })
+    assert.equal(result.provision, undefined, "no provision rows may exist with provision: \"off\"")
+    const cacheDir = cacheDirFor(root, SPEC_PROVISIONED)
+    assert.equal(
+      fs.existsSync(path.join(cacheDir, "tree", "node_modules")),
+      false,
+      "nothing may be provisioned into the tree",
+    )
+    await assert.rejects(() => import(result.url), (error) => {
+      assert.match(String(error.message), /Cannot find package|Cannot find module|ERR_MODULE_NOT_FOUND/)
+      return true
+    })
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true })
+  }
+})
+
+test("resolveGithubPlugin: a warm reload of a provisioned cache re-verifies the marker with zero network and the entry still imports", async () => {
+  const root = tmpRoot()
+  try {
+    const storeRoot = path.join(root, "store")
+    const source = writeStorePackage(storeRoot, "demo-dep", DEMO_DEP)
+    const first = await resolveGithubPlugin(SPEC_PROVISIONED, {
+      cacheRoot: root,
+      fetchImpl: fakeFetch({ tree: PROVISION_TREE }),
+      trusted: true,
+      hostStores: [storeRoot],
+    })
+    assert.equal(first.fetched, true)
+    await import(first.url)
+    const cacheDir = cacheDirFor(root, SPEC_PROVISIONED)
+    const markerFile = path.join(cacheDir, "tree", "node_modules", ".bifrost-provision.json")
+    const markerBefore = fs.readFileSync(markerFile, "utf8")
+
+    const warm = await resolveGithubPlugin(SPEC_PROVISIONED, {
+      cacheRoot: root,
+      fetchImpl: noNetwork(),
+      hostStores: [storeRoot],
+    })
+    assert.equal(warm.fetched, false, "the warm load must be a verified cache hit")
+    assert.equal(warm.provision, undefined, "a coherent marker must re-provision nothing (and row nothing)")
+    assert.equal(warm.url, first.url)
+    assert.equal(
+      fs.readlinkSync(path.join(cacheDir, "tree", "node_modules", "demo-dep")),
+      source,
+      "the junction must still point at the host store",
+    )
+    assert.equal(fs.readFileSync(markerFile, "utf8"), markerBefore, "the marker must be untouched by a coherent load")
+    const module = await import(warm.url)
+    assert.equal(module.default.tag, "provisioned", "the entry must still import after the warm reload")
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true })
+  }
+})
+
+test("resolveGithubPlugin: a warm load re-resolves a junction whose host-store location moved (stale re-resolution)", async () => {
+  const root = tmpRoot()
+  try {
+    const storeA = path.join(root, "store-a")
+    writeStorePackage(storeA, "demo-dep", DEMO_DEP)
+    await resolveGithubPlugin(SPEC_PROVISIONED, {
+      cacheRoot: root,
+      fetchImpl: fakeFetch({ tree: PROVISION_TREE }),
+      trusted: true,
+      hostStores: [storeA],
+    })
+    const storeB = path.join(root, "store-b")
+    fs.renameSync(storeA, storeB)
+    const sourceB = path.join(storeB, "demo-dep")
+
+    const warm = await resolveGithubPlugin(SPEC_PROVISIONED, {
+      cacheRoot: root,
+      fetchImpl: noNetwork(),
+      hostStores: [storeB],
+    })
+    assert.equal(warm.fetched, false, "the re-resolution must stay zero-network")
+    assert.ok(warm.provision, "a stale junction must be re-resolved on a warm load")
+    assert.ok(
+      warm.provision.includes(`provision demo-dep - host:${sourceB}`),
+      `rows: ${JSON.stringify(warm.provision)}`,
+    )
+    const dest = path.join(cacheDirFor(root, SPEC_PROVISIONED), "tree", "node_modules", "demo-dep")
+    assert.equal(fs.readlinkSync(dest), sourceB, "the junction must now point at the moved store")
+    const marker = JSON.parse(
+      fs.readFileSync(path.join(cacheDirFor(root, SPEC_PROVISIONED), "tree", "node_modules", ".bifrost-provision.json"), "utf8"),
+    )
+    assert.equal(marker.actions[0].target, sourceB, "the marker must record the re-resolved target")
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true })
+  }
+})
+
+test("resolveGithubPlugin: a warm load re-provisions when the tree's declared deps drift", async () => {
+  const root = tmpRoot()
+  try {
+    const storeRoot = path.join(root, "store")
+    const firstSource = writeStorePackage(storeRoot, "demo-dep", DEMO_DEP)
+    const secondSource = writeStorePackage(storeRoot, "second-dep", DEMO_DEP)
+    await resolveGithubPlugin(SPEC_PROVISIONED, {
+      cacheRoot: root,
+      fetchImpl: fakeFetch({ tree: PROVISION_TREE }),
+      trusted: true,
+      hostStores: [storeRoot],
+    })
+    const cacheDir = cacheDirFor(root, SPEC_PROVISIONED)
+    fs.writeFileSync(
+      path.join(cacheDir, "tree", "package.json"),
+      JSON.stringify({ name: "fixture", version: "1.0.0", dependencies: { "demo-dep": "1.0.0", "second-dep": "1.0.0" } }),
+    )
+
+    const warm = await resolveGithubPlugin(SPEC_PROVISIONED, {
+      cacheRoot: root,
+      fetchImpl: noNetwork(),
+      hostStores: [storeRoot],
+    })
+    assert.equal(warm.fetched, false, "the drift re-provision must stay zero-network")
+    assert.ok(
+      warm.provision?.includes(`provision second-dep - host:${secondSource}`),
+      `rows: ${JSON.stringify(warm.provision)}`,
+    )
+    const dest = path.join(cacheDir, "tree", "node_modules", "second-dep")
+    assert.equal(fs.lstatSync(dest).isSymbolicLink(), true, "the drifted-in dep must be provisioned")
+    assert.equal(fs.readlinkSync(dest), secondSource)
+    assert.equal(
+      fs.readlinkSync(path.join(cacheDir, "tree", "node_modules", "demo-dep")),
+      firstSource,
+      "the already-provisioned dep must be left untouched",
+    )
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true })
+  }
+})
+
+test("resolveGithubPlugin: a single-file fallback rows \"provision skipped: no package.json\" and still mounts", async () => {
+  const root = tmpRoot()
+  try {
+    const raw = { [PROVISIONED_PATH]: 'export default { id: "demo", setup() {} }\n' }
+    const impl = fakeFetch({ tree: {}, raw })
+    const result = await resolveGithubPlugin(SPEC_PROVISIONED, {
+      cacheRoot: root,
+      fetchImpl: impl,
+      trusted: true,
+    })
+    assert.equal(result.meta.layout, "single-file")
+    assert.ok(
+      result.provision?.includes("provision skipped: no package.json"),
+      `rows: ${JSON.stringify(result.provision)}`,
+    )
+    assert.equal(
+      fs.existsSync(path.join(cacheDirFor(root, SPEC_PROVISIONED), "plugin.ts")),
+      true,
+      "the mount must proceed with the cached entry file",
+    )
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true })
+  }
+})
+
+test("resolveGithubPlugin: a provision refusal under strict: true aborts with the refusal text (npm failure)", async () => {
+  const root = tmpRoot()
+  try {
+    const emptyStore = path.join(root, "empty-store")
+    fs.mkdirSync(emptyStore, { recursive: true })
+    const shimDir = path.join(root, "shim")
+    setFakeNpm(shimDir, 1)
+    const savedPath = process.env.PATH
+    process.env.PATH = shimDir + path.delimiter + (savedPath ?? "")
+    try {
+      await assert.rejects(
+        () =>
+          resolveGithubPlugin(SPEC_PROVISIONED, {
+            cacheRoot: root,
+            fetchImpl: fakeFetch({ tree: PROVISION_TREE }),
+            trusted: true,
+            provision: "npm",
+            hostStores: [emptyStore],
+            strict: true,
+          }),
+        (error) => {
+          assert.match(String(error.message), /provision refused demo-dep - no host-store hit and npm install --no-save failed/)
+          return true
+        },
+      )
+      // Without strict the refusal is a loud ROW and the mount still resolves.
+      const tolerated = await resolveGithubPlugin(SPEC_PROVISIONED, {
+        cacheRoot: root,
+        fetchImpl: fakeFetch({ tree: PROVISION_TREE }),
+        trusted: true,
+        provision: "npm",
+        hostStores: [emptyStore],
+      })
+      assert.ok(
+        tolerated.provision?.some((row) => row.startsWith("provision refused demo-dep")),
+        `rows: ${JSON.stringify(tolerated.provision)}`,
+      )
+    } finally {
+      process.env.PATH = savedPath
+    }
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true })
+  }
 })

@@ -1,5 +1,24 @@
 # Changelog
 
+## 1.4.1 (2026-09-30)
+
+### Fixed
+
+- **Host-store provisioning now resolves dependencies from the client's real
+  per-package npm-cache layout** (`src/provision.ts`). The lookup scans the
+  `node_modules` of EVERY per-package install root, so a hoisted peer that lives
+  inside another package's install root - not under a root named for it - is
+  resolved too. Still zero network, still no manual junctions.
+- **`provision: "npm"` is hardened with `--legacy-peer-deps`.** A plain
+  `npm install` ERESOLVEs on this peer set, so the fallback refused instead of
+  installing; the flag lets the declared dependency set install.
+- **Provision rows survive an entry-import failure** (`src/index.ts`). When a
+  tree's entry import failed, its provision rows were swallowed with it; the
+  provisioning result is now kept and reported even as the import fails.
+- **The TUI wrapper target is derived from the package's own `./tui` export**
+  (`src/wire-tui.ts`). Trees without a TUI entry are skipped cleanly - no wrapper
+  and no `cli.json` entry - instead of producing broken entries.
+
 ## 1.4.0 (2026-09-30)
 
 - Provision fetched GitHub snapshots from the OpenCode host npm store via junction, with consent-gated npm fallback and loud refusals.

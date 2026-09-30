@@ -54,6 +54,25 @@ export interface BifrostOptions {
    * variable; an invalid value is a loud refusal.
    */
   provision?: "host" | "npm" | "off"
+  /**
+   * Opt-in TUI wiring for a mounted `github:` SNAPSHOT: after its entry
+   * mounts, oc-bifrost ensures a `tui.tsx` wrapper at the tree root and adds
+   * the tree as a `file://` plugin entry in the caller-computed cli.json
+   * (`~/.config/opencode/cli.json` by default) - a byte-preserving JSONC
+   * merge. Snapshot layouts only (the single-file fallback is never wired);
+   * whether a wrapper is needed is wire-tui.ts's own decision, never
+   * duplicated here. A wire failure or refusal is a loud mount row and never
+   * aborts the already-completed mount. An explicit value here wins over the
+   * `OC_BIFROST_WIRE_TUI` environment variable (`"1"`/`"true"` opt in;
+   * anything else is off).
+   */
+  wireTui?: boolean
+  /**
+   * The cli.json path `wireTui` merges into - normally
+   * `~/.config/opencode/cli.json`, computed by the CALLER (wire-tui.ts never
+   * guesses). Overridable for tests; production configs do not set this.
+   */
+  cliJsonPath?: string
 }
 
 export type SupportLevel = "full" | "partial" | "unsupported" | "mounted"

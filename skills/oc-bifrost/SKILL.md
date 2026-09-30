@@ -30,8 +30,14 @@ Plugin must export a default definition with an id and an effect or setup functi
      environment. A warm, hash-verified cache then loads with no re-consent and no network; the mount
      report always prints the resolved commit, the digest, and the host-rights line. An offline cold
      cache fails closed and names the pre-warm path.
-   - `preset:rtk` — optional offline / no-fetch fallback, for air-gapped hosts (needs the `rtk` binary on `PATH`)
-   - a local path — `./.opencode/legacy/<name>.ts` (project) or an absolute path (global)
+   - `preset:rtk` - optional offline / no-fetch fallback, for air-gapped hosts (needs the `rtk` binary on `PATH`)
+   - a local path - `./.opencode/legacy/<name>.ts` (project) or an absolute path (global)
+   Option keys: `provision` - `"host"` (default) junctions a fetched snapshot's declared
+   dependencies from the shared OpenCode npm cache (zero network), `"npm"` adds an
+   `npm install --no-save` fallback, `"off"` disables provisioning (`OC_BIFROST_PROVISION`
+   sets the mode when the option is omitted; an explicit option wins). `wireTui` (default
+   `false`) adds a `tui.tsx` wrapper and a `file://` plugins entry in cli.json after a
+   `github:` snapshot mounts (`OC_BIFROST_WIRE_TUI=1` opts in; snapshot layouts only).
 5. Restart. Confirm `loading plugin` with no `LoadError`, and read the printed report.
 6. Verify with a **side effect**, not the report: trigger one real tool call and assert the plugin's observable behaviour actually happened.
 

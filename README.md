@@ -165,8 +165,30 @@ This bridges **the mappable subset**, not "any plugin, seamlessly." Nine of the 
 | `strict` | `boolean` | `false` | Abort setup on an unsupported or unmountable hook |
 | `verbose` | `boolean` | `true` | Print the per-plugin compatibility report |
 | `freshness` | `"off" \| "online"` | `"off"` | Check the bundled pin against upstream's latest release after mounting |
+| `provision` | `"host" \| "npm" \| "off"` | `"host"` | How a fetched `github:` snapshot's declared dependencies are provided before its entry is imported - `"host"` junctions them from the shared OpenCode npm cache (zero network), `"npm"` adds an `npm install --no-save` fallback for packages the host store lacks, `"off"` is 1.3.x behavior |
+| `wireTui` | `boolean` | `false` | Opt-in TUI wiring for a mounted `github:` snapshot - ensures a `tui.tsx` wrapper at the tree root and adds the tree as a `file://` plugin entry in cli.json; snapshot layouts only (the single-file fallback is never wired), and a wire failure is a loud row that never aborts the mount |
 
-`freshness: "online"` (or `OC_BIFROST_FRESHNESS=online`) is off by default, never downloads or executes plugin code, fires off the load path, and reports `unknown` — not an error — when offline or rate-limited.
+`freshness: "online"` (or `OC_BIFROST_FRESHNESS=online`) is off by default, never downloads or executes plugin code, fires off the load path, and reports `unknown` - not an error - when offline or rate-limited.
+
+`OC_BIFROST_PROVISION` sets the `provision` mode when the option is omitted (`"host"`, `"npm"`, or `"off"`); an explicit option wins, and an invalid value is a loud refusal. `OC_BIFROST_WIRE_TUI` opts `wireTui` in with exactly `"1"` or `"true"`; an explicit option wins, anything else is off.
+
+Wire a TUI plugin from github:
+
+```jsonc
+// opencode.jsonc
+{
+  "plugins": [
+    {
+      "package": "@nathwn12/oc-bifrost@1.3.3",
+      "options": {
+        "plugins": ["github:obra/superpowers"],
+        "trustRemote": true, // consent: the first `github:` fetch downloads and executes a remote plugin
+        "wireTui": true // after mount, add a tui.tsx wrapper and a cli.json plugin entry
+      }
+    }
+  ]
+}
+```
 
 The durable report file (see above) is controlled by the `OC_BIFROST_REPORT` environment variable, not an option: it defaults to the shared OpenCode cache and can be redirected to a path or disabled with `off`.
 

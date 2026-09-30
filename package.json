@@ -1,6 +1,6 @@
 {
   "name": "@nathwn12/oc-bifrost",
-  "version": "1.4.1",
+  "version": "1.4.2",
   "description": "The rainbow bridge for OpenCode plugins — run V1-era plugin hooks on the OpenCode V2 runtime; unmapped hooks are refused loudly instead of silently dropped.",
   "keywords": [
     "opencode",
@@ -15,7 +15,7 @@
   "author": "nathwn12",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/nathwn12/oc-bifrost.git"
+    "url": "https://github.com/nathwn12/oc-bifrost"
   },
   "type": "module",
   "main": "./dist/index.js",

@@ -70,7 +70,7 @@
   - single-file fallback (no package.json in fetch): `provision skipped: no package.json` row; mount proceeds (Review Focus 4).
   - strict: npm failure with `strict: true` -> setup aborts with the refusal text.
 - [ ] **Step 2: Run - expected FAIL.**
-- [ ] **Step 3: Implement** - call `provisionTree` in `fetchAndRecord` after materialization (before the entry probe/import), feeding `hostStores: [<the shared opencode npm cache root>]` derived from the cache root already computed (`githubCacheRoot`'s parent), npm fallback per option; thread `provision` through `GithubResolveOptions` + `BifrostOptions` + env.
+- [ ] **Step 3: Implement** - call `provisionTree` in `fetchAndRecord` after materialization (before the entry probe/import), feeding `hostStores: [<XDG_CACHE_HOME or ~/.cache>/opencode/npm]` (the shared OpenCode npm cache root - the `npm` sibling of the bridge's own `oc-bifrost` cache dir; NOT `githubCacheRoot`'s parent, which is the `oc-bifrost` dir itself - corrected per controller ruling R-2, live layout verified `C:\Users\nathan\.cache\opencode\npm\<name>@<version>\<cacheId>\node_modules\<name>`), npm fallback per option; thread `provision` through `GithubResolveOptions` + `BifrostOptions` + env.
 - [ ] **Step 4: Run `npm run check` - green (all prior suites + new).**
 - [ ] **Step 5: Commit.**
 

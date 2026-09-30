@@ -115,6 +115,33 @@ test("provisionTree: a host-store package is junctioned into the tree (zero netw
   }
 })
 
+test("provisionTree: a flat host store (package directly at <store>/<name>) is junctioned", async () => {
+  const root = tmpRoot()
+  try {
+    const tree = path.join(root, "tree")
+    writeTree(tree, { packageJson: { name: "fixture", version: "1.0.0", dependencies: { "@scope/peer": "1.0.0" } } })
+    const store = path.join(root, "store")
+    // Layout (a): the store IS a flat package dir - no node_modules segment,
+    // scoped packages nest directly under <store>/@scope/.
+    const source = writePackage(store, "@scope/peer", {
+      "package.json": JSON.stringify({ name: "@scope/peer", version: "1.0.0" }),
+      "index.js": "export default 1\n",
+    })
+
+    const report = await provisionTree(tree, { hostStores: [store] })
+
+    assert.deepEqual(report.actions, [{ package: "@scope/peer", source: "host", target: source }])
+    assert.deepEqual(report.refused, [])
+    assert.equal(
+      fs.readFileSync(path.join(tree, "node_modules", "@scope", "peer", "package.json"), "utf8"),
+      JSON.stringify({ name: "@scope/peer", version: "1.0.0" }),
+      "the junction must resolve through to the flat-layout package",
+    )
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true })
+  }
+})
+
 test("provisionTree: dryRun records the host action but creates nothing", async () => {
   const root = tmpRoot()
   try {

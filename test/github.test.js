@@ -1494,7 +1494,10 @@ test("resolveGithubPlugin: a warm load re-points a junction deleted from the tre
     // The store stays alive; ONLY the tree-local junction disappears. This is
     // the hole the per-target-only check left: a dead junction whose store
     // still lives must NOT stay coherent.
-    fs.rmdirSync(dest)
+    // A junction (Windows) is a directory entry, so rmdir works there, but a
+    // POSIX symlink is not a directory: unlink it instead.
+    if (fs.lstatSync(dest).isSymbolicLink()) fs.unlinkSync(dest)
+    else fs.rmdirSync(dest)
     assert.equal(fs.existsSync(dest), false, "the junction must be gone before the warm load")
 
     const warm = await resolveGithubPlugin(SPEC_PROVISIONED, {

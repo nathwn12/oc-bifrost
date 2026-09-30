@@ -346,11 +346,17 @@ test("consent: a cold cache without opt-in refuses BEFORE fetching anything", as
   }
 })
 
-test("consent: the refusal message names what is about to be fetched and the exact opt-in", () => {
+test("consent: the refusal message names what is about to be fetched, the provisioning it authorizes, and the exact opt-in", () => {
   const message = consentMessage(SPECS.bare)
   assert.match(message, /^\[oc-bifrost\] refusing to fetch/)
   assert.match(message, /from https:\/\/github\.com\/obra\/superpowers/)
   assert.match(message, /EXECUTE its entry file with this host process's full user rights/)
+  // Provisioning is named explicitly, per mode, under the SAME gate.
+  assert.match(message, /provisions the entry's declared dependencies/)
+  assert.match(message, /options\.provision: "host"/)
+  assert.match(message, /options\.provision: "npm"/)
+  assert.match(message, /options\.provision: "off"/)
+  assert.match(message, /no second consent/, "provisioning must ride the ONE opt-in, never add a second gate")
   assert.match(message, /Nothing was fetched and nothing was executed/)
 })
 

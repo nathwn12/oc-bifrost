@@ -856,7 +856,8 @@ async function verifyProvisionedTree(treeDir: string, opts: GithubResolveOptions
 /**
  * The informed-consent refusal for a cold cache. Names exactly what is about
  * to be fetched, that it will execute with the host process's full user
- * rights, and the exact opt-in — before anything is fetched.
+ * rights, and what provisioning the SAME opt-in also authorizes - before
+ * anything is fetched.
  */
 export function consentMessage(spec: GithubSpec): string {
   const target =
@@ -867,6 +868,8 @@ export function consentMessage(spec: GithubSpec): string {
   return (
     `[oc-bifrost] refusing to fetch "${safe(githubLabel(spec))}" (cold cache, first use): the first fetch would download ${target} ` +
     `from https://github.com/${spec.owner}/${spec.repo} at ${refPart} and EXECUTE its entry file with this host process's full user rights. ` +
+    `That same fetch also resolves and provisions the entry's declared dependencies before the entry is imported: with options.provision: "host" (the default) each dependency is linked in from the host's own plugin store, with options.provision: "npm" anything the host lacks is downloaded and installed by npm inside the verified cache tree, and with options.provision: "off" provisioning is skipped entirely (1.3.x behavior). ` +
+    `Provisioning runs with the same host rights, under this one opt-in - no second consent. ` +
     `First-use fetching is opt-in, per oc-bifrost entry: set options.trustRemote: true, or set the environment variable OC_BIFROST_TRUST=github. ` +
     `Nothing was fetched and nothing was executed. A warm (hash-verified) cache never needs this consent.`
   )

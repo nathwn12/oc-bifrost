@@ -13,9 +13,15 @@ import { wireTui, unwireTui, __setWireTuiSeamForTests } from "../dist/wire-tui.j
  *     tree lacks a loadable `tui.{ts,tsx}` (a directory does not count);
  *     idempotent - a loadable file means no write, ever. The re-export target
  *     is the tree's own `exports["./tui"]` / `tui` field / a discovered
- *     `src/tui/index.tsx`. A tree that ships NONE of those is a clean skip -
- *     no wrapper, no cli.json entry, an informational row - while a DECLARED
- *     target that names no real file inside the tree is refused loudly
+ *     `src/tui/index.tsx`, derived BEFORE any existing wrapper is consulted.
+ *     A wrapper this module wrote carries its managed marker (a file the
+ *     pre-derive 1.4.0 release wrote has the exact legacy bytes): it is healed
+ *     against the derived target -
+ *     removed when the target is none, rewritten when the target moved - and
+ *     a user-authored file is never deleted. A tree that ships NONE of those
+ *     entries is a clean skip - no wrapper, no cli.json entry, an
+ *     informational row - while a DECLARED target that names no real file
+ *     inside the tree is refused loudly
  *   - cli.json: a TEXT merge that splices ONLY the `plugins` key. The exact
  *     entry string is `url.pathToFileURL(treeDir).href` (forward slashes,
  *     matching the live, load-verified entry form) and dedupe is by that
@@ -27,12 +33,23 @@ import { wireTui, unwireTui, __setWireTuiSeamForTests } from "../dist/wire-tui.j
  *     simulates that concurrent writer
  *   - unwireTui removes ONLY what wireTui added (its inline-marked entries /
  *     the whole key it auto-created), byte-preserving everything else, and
- *     returns false when there is nothing to do
+ *     returns false when there is nothing to do. With an `entry` argument it
+ *     removes only that tree's managed entry
  *
  * All paths live in tmp dirs; no real machine paths appear anywhere.
  */
 
-const WRAPPER_CONTENT = 'export { default } from "./src/tui/index.tsx";\n'
+const WRAPPER_MARKER = "// oc-bifrost: managed TUI entry"
+
+/** The managed wrapper body this module writes for a tree-relative target. */
+function wrapperFor(target) {
+  return `${WRAPPER_MARKER}\nexport { default } from "./${target}";\n`
+}
+
+/** The exact wrapper the pre-derive 1.4.0 release wrote for EVERY tree (1.4.1 derived the target). */
+const LEGACY_WRAPPER_CONTENT = 'export { default } from "./src/tui/index.tsx";\n'
+
+const WRAPPER_CONTENT = wrapperFor("src/tui/index.tsx")
 
 /** Write a tree with a package manifest and/or a real nested TUI entry file. */
 function writeTuiTree(tree, { manifest, files = {} } = {}) {
@@ -110,7 +127,7 @@ test("wireTui: creates the tui.tsx wrapper re-exporting the tree's own exports[\
     assert.ok(out.entry.startsWith("file:///"), "the entry must be a file URL with forward slashes")
     assert.equal(
       fs.readFileSync(path.join(tree, "tui.tsx"), "utf8"),
-      'export { default } from "./tui/deck.tsx";\n',
+      wrapperFor("tui/deck.tsx"),
       "the wrapper must re-export the tree's OWN declared tui entry, not a hardcoded path",
     )
   } finally {
@@ -129,7 +146,7 @@ test("wireTui: the wrapper target falls back to a top-level tui field", async ()
     await wireTui(tree, cli)
     assert.equal(
       fs.readFileSync(path.join(tree, "tui.tsx"), "utf8"),
-      'export { default } from "./tui/main.tsx";\n',
+      wrapperFor("tui/main.tsx"),
       "a tui field must drive the wrapper target",
     )
   } finally {
@@ -266,6 +283,259 @@ test("wireTui: a tui.ts that is a DIRECTORY does not count as loadable; a tui.ts
       (e) => e instanceof Error && e.message.includes("[oc-bifrost]") && e.message.includes("tui.tsx"),
       "the refusal must be loud, prefixed, and name the failing path",
     )
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true })
+  }
+})
+
+/* ---- managed wrapper healing (a warm cache from an earlier version) ---- */
+
+test("wireTui: heals a warm-cache stale managed wrapper with no derived target - wrapper removed, tree skipped and unwired", async () => {
+  const root = tmpRoot()
+  try {
+    // The warm cache: a tree that ships NO TUI entry, carrying the hardcoded
+    // wrapper 1.4.0 wrote, and a cli.json that already registered the tree.
+    const tree = writeTuiTree(writeTree(root, { tuiEntry: false }), { manifest: { name: "widget", version: "1.0.0" } })
+    const wrapperPath = path.join(tree, "tui.tsx")
+    fs.writeFileSync(wrapperPath, LEGACY_WRAPPER_CONTENT)
+    const entry = pathToFileURL(tree).href
+    const cli = writeCli(root, `{\n  "plugins": [\n    ${CREATED_KEY_MARKER}\n    "${entry}"\n  ]\n}\n`)
+
+    const out = await wireTui(tree, cli)
+
+    assert.equal(out.kind, "skipped", "a tree with no derived target must be skipped, never wired")
+    assert.match(out.reason, /no TUI entry found/, "the skip row must say what was not found")
+    assert.ok(out.reason.includes(tree), "the skip row must name the tree")
+    assert.ok(!out.reason.includes("[oc-bifrost]"), "a healing skip is informational, never a refusal")
+    assert.equal(fs.existsSync(wrapperPath), false, "the stale managed wrapper must be removed")
+    const after = fs.readFileSync(cli, "utf8")
+    assert.ok(!after.includes(entry), "the tree must no longer be registered in cli.json")
+    assert.deepEqual(JSON.parse(after), {}, "the auto-created plugins key must be taken back out")
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true })
+  }
+})
+
+test("wireTui: rewrites a legacy unmarked wrapper to the newly derived target with the managed marker", async () => {
+  const root = tmpRoot()
+  try {
+    // The manifest declares ./tui somewhere else; 1.4.0 still wrote the
+    // hardcoded discovered-path wrapper. The derived target is authoritative,
+    // so a wrapper we wrote must be rewritten to it, never treated as an entry.
+    const tree = writeTuiTree(writeTree(root), {
+      manifest: { name: "widget", version: "1.0.0", exports: { "./tui": "./tui/deck.tsx" } },
+      files: { "tui/deck.tsx": "export default {}\n" },
+    })
+    const wrapperPath = path.join(tree, "tui.tsx")
+    fs.writeFileSync(wrapperPath, LEGACY_WRAPPER_CONTENT)
+    const cli = writeCli(root, "{}")
+
+    const out = await wireTui(tree, cli)
+
+    assert.equal(out.wrapper, wrapperPath, "the managed wrapper must be rewritten")
+    assert.equal(
+      fs.readFileSync(wrapperPath, "utf8"),
+      wrapperFor("tui/deck.tsx"),
+      "the rewritten wrapper must re-export the DERIVED target and carry the managed marker",
+    )
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true })
+  }
+})
+
+test("wireTui: a managed wrapper never hides a broken declaration - declared-missing refuses, wrapper untouched", async () => {
+  const root = tmpRoot()
+  try {
+    // The declaration itself is broken (the declared file is absent). A
+    // managed wrapper from an earlier version must not turn that into a
+    // silent wire, and must not be rewritten to a target that does not exist.
+    const tree = writeTuiTree(writeTree(root, { tuiEntry: false }), {
+      manifest: { name: "widget", version: "1.0.0", exports: { "./tui": "./src/tui/index.tsx" } },
+    })
+    const wrapperPath = path.join(tree, "tui.tsx")
+    fs.writeFileSync(wrapperPath, LEGACY_WRAPPER_CONTENT)
+    const cli = writeCli(root, "{}")
+
+    await assert.rejects(
+      () => wireTui(tree, cli),
+      (e) =>
+        e instanceof Error &&
+        e.message.includes("[oc-bifrost]") &&
+        e.message.includes('"src/tui/index.tsx"') &&
+        e.message.includes(tree),
+      "a managed wrapper must not mask a declared target that is not a real file",
+    )
+    assert.equal(fs.readFileSync(wrapperPath, "utf8"), LEGACY_WRAPPER_CONTENT, "a refusal must leave the wrapper untouched")
+    assert.equal(fs.readFileSync(cli, "utf8"), "{}", "a refusal must not touch cli.json")
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true })
+  }
+})
+
+test("wireTui: healing is idempotent - a second pass over a healed tree writes nothing", async () => {
+  const root = tmpRoot()
+  try {
+    const tree = writeTuiTree(writeTree(root, { tuiEntry: false }), { manifest: { name: "widget", version: "1.0.0" } })
+    const wrapperPath = path.join(tree, "tui.tsx")
+    fs.writeFileSync(wrapperPath, LEGACY_WRAPPER_CONTENT)
+    const entry = pathToFileURL(tree).href
+    const cli = writeCli(root, `{\n  "plugins": ["keep-me",\n    ${ENTRY_MARKER}\n    "${entry}"]\n}\n`)
+
+    const first = await wireTui(tree, cli)
+    const healed = fs.readFileSync(cli, "utf8")
+    const second = await wireTui(tree, cli)
+
+    assert.equal(first.kind, "skipped")
+    assert.equal(second.kind, "skipped")
+    assert.equal(fs.existsSync(wrapperPath), false, "the wrapper must stay removed")
+    assert.equal(fs.readFileSync(cli, "utf8"), healed, "the second pass must not touch cli.json")
+    assert.deepEqual(JSON.parse(healed).plugins, ["keep-me"], "only our entry may be removed")
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true })
+  }
+})
+
+test("wireTui: a user-authored tui.tsx is never deleted, even when the tree declares no TUI target", async () => {
+  const root = tmpRoot()
+  try {
+    // No declaration and no src/tui/index.tsx: the derived target is `none`,
+    // but a loadable USER file is still the tree's own entry - nothing
+    // without our marker is bifrost's to remove (or rewrite).
+    const tree = writeTuiTree(writeTree(root, { tuiEntry: false }), { manifest: { name: "widget", version: "1.0.0" } })
+    const wrapperPath = path.join(tree, "tui.tsx")
+    const authored = "export default { mount() {} }\n"
+    fs.writeFileSync(wrapperPath, authored)
+    const cli = writeCli(root, "{}")
+
+    const out = await wireTui(tree, cli)
+
+    assert.equal(out.kind, "wired", "a user-authored loadable entry is still wireable")
+    assert.equal(out.wrapper, null, "no wrapper may be written over a user's file")
+    assert.equal(fs.readFileSync(wrapperPath, "utf8"), authored, "the user's bytes must survive untouched")
+    const registered = JSON.parse(
+      fs
+        .readFileSync(cli, "utf8")
+        .split("\n")
+        .filter((line) => !line.trim().startsWith("//"))
+        .join("\n"),
+    )
+    assert.deepEqual(registered.plugins, [pathToFileURL(tree).href])
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true })
+  }
+})
+
+test("wireTui: a user-authored tui.ts beside a stale managed tui.tsx stays wired - the managed shadow is removed, the user's file untouched", async () => {
+  const root = tmpRoot()
+  try {
+    // A tree that ships a user-authored root tui.ts AND carries a stale
+    // managed wrapper from the pre-derive release. The host probes root `tui`
+    // by extension, and Bun probes .tsx BEFORE .ts (import.bun.ts:8), so the
+    // managed wrapper SHADOWS the user's entry: it must go, the user's file
+    // must survive byte-for-byte, and the tree must stay registered.
+    const tree = writeTuiTree(writeTree(root, { tuiEntry: false }), { manifest: { name: "widget", version: "1.0.0" } })
+    const userEntry = "export default { mount() {} }\n"
+    fs.writeFileSync(path.join(tree, "tui.ts"), userEntry)
+    const wrapperPath = path.join(tree, "tui.tsx")
+    fs.writeFileSync(wrapperPath, LEGACY_WRAPPER_CONTENT)
+    const cli = writeCli(root, '{\n  "verbosity": 2\n}\n')
+
+    const out = await wireTui(tree, cli)
+
+    assert.equal(out.kind, "wired", "a tree with its own user tui.ts must stay wired, never skipped")
+    assert.equal(out.wrapper, null, "the user's entry means no wrapper may be written")
+    assert.equal(fs.existsSync(wrapperPath), false, "the stale managed wrapper that shadows tui.ts must be removed")
+    assert.equal(fs.readFileSync(path.join(tree, "tui.ts"), "utf8"), userEntry, "the user's entry must survive byte-for-byte")
+    const entry = pathToFileURL(tree).href
+    assert.ok(fs.readFileSync(cli, "utf8").includes(entry), "the tree must stay registered in cli.json")
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true })
+  }
+})
+
+test("wireTui: a single-quoted managed cli.json entry is matched and unwired - and the reported reason is true", async () => {
+  const root = tmpRoot()
+  try {
+    // JSONC accepts single-quoted strings, so a managed entry may be spelled
+    // with them. Healing must compare the parsed value: the entry really is
+    // unwired, and the skip row may not claim a removal that did not happen.
+    const tree = writeTuiTree(writeTree(root, { tuiEntry: false }), { manifest: { name: "widget", version: "1.0.0" } })
+    const wrapperPath = path.join(tree, "tui.tsx")
+    fs.writeFileSync(wrapperPath, LEGACY_WRAPPER_CONTENT)
+    const entry = pathToFileURL(tree).href
+    const cli = writeCli(root, `{\n  "plugins": ["keep-me",\n    ${ENTRY_MARKER}\n    '${entry}']\n}\n`)
+
+    const out = await wireTui(tree, cli)
+
+    assert.equal(out.kind, "skipped")
+    assert.equal(fs.existsSync(wrapperPath), false, "the stale managed wrapper must be removed")
+    assert.ok(out.reason.includes("unwired the tree"), "the report must state the tree was unwired")
+    const after = fs.readFileSync(cli, "utf8")
+    assert.ok(!after.includes(entry), "the single-quoted entry must actually be gone - the reason must match reality")
+    const surviving = JSON.parse(
+      after
+        .split("\n")
+        .filter((line) => !line.trim().startsWith("//"))
+        .join("\n"),
+    )
+    assert.deepEqual(surviving.plugins, ["keep-me"], "only the user's entry may remain")
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true })
+  }
+})
+
+test("wireTui: a stale managed wrapper with an empty cli.json removes the wrapper without claiming an unwire that never happened", async () => {
+  const root = tmpRoot()
+  try {
+    // The wrapper is ours to remove, but this cli.json never carried a
+    // `plugins` key at all: the skip row may report the wrapper removal,
+    // never an unwire that did not occur.
+    const tree = writeTuiTree(writeTree(root, { tuiEntry: false }), { manifest: { name: "widget", version: "1.0.0" } })
+    const wrapperPath = path.join(tree, "tui.tsx")
+    fs.writeFileSync(wrapperPath, LEGACY_WRAPPER_CONTENT)
+    const cli = writeCli(root, "{}")
+
+    const out = await wireTui(tree, cli)
+
+    assert.equal(out.kind, "skipped")
+    assert.equal(fs.existsSync(wrapperPath), false, "the stale managed wrapper must still be removed")
+    assert.ok(out.reason.includes("removed the stale managed tui.tsx"), "the row must report the wrapper removal")
+    assert.ok(!out.reason.includes("unwired the tree"), "the row may not claim an unwire when cli.json never registered the tree")
+    assert.ok(out.reason.includes("no managed cli.json entry was unwired"), "the row must state the truth about the cli.json side")
+    assert.equal(fs.readFileSync(cli, "utf8"), "{}", "cli.json must stay untouched")
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true })
+  }
+})
+
+test("wireTui: healing one tree unwires only that tree - a second wired tree stays registered", async () => {
+  const root = tmpRoot()
+  try {
+    const treeA = writeTreeAt(path.join(root, "tree-a"))
+    const treeB = writeTreeAt(path.join(root, "tree-b"))
+    const entryA = pathToFileURL(treeA).href
+    const entryB = pathToFileURL(treeB).href
+    const cli = writeCli(root, '{\n  "plugins": ["keep-me"]\n}\n')
+    await wireTui(treeA, cli)
+    await wireTui(treeB, cli)
+
+    // A later snapshot of tree A drops its TUI entry; tree B is unaffected.
+    fs.rmSync(path.join(treeA, "src", "tui", "index.tsx"))
+    const out = await wireTui(treeA, cli)
+
+    assert.equal(out.kind, "skipped")
+    assert.equal(fs.existsSync(path.join(treeA, "tui.tsx")), false, "tree A's managed wrapper must be removed")
+    const after = fs.readFileSync(cli, "utf8")
+    assert.ok(!after.includes(entryA), "tree A must be unwired")
+    assert.ok(after.includes(entryB), "tree B must stay registered")
+    assert.equal(after.split(ENTRY_MARKER).length - 1, 1, "only tree B's managed marker may remain")
+    const surviving = JSON.parse(
+      after
+        .split("\n")
+        .filter((line) => !line.trim().startsWith("//"))
+        .join("\n"),
+    )
+    assert.deepEqual(surviving.plugins, ["keep-me", entryB])
   } finally {
     fs.rmSync(root, { recursive: true, force: true })
   }

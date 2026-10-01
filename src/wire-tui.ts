@@ -6,20 +6,30 @@
  * entry, and (b) the harness `cli.json` carries a `plugins` entry that is the
  * tree as a `file://` URL. This module automates both steps:
  *
- *   - WRAPPER, IDEMPOTENT, AND SKIPPED WHEN THERE IS NOTHING TO WIRE.
- *     `tui.tsx` is created ONLY when the tree lacks a loadable
- *     `tui.{ts,tsx}` - a file that exists but is a directory does NOT count
- *     as loadable. A loadable entry means no write, ever. The wrapper
- *     re-exports the TREE'S OWN tui entry, derived in order from the tree
- *     manifest: `exports["./tui"]` (import/default/require), a top-level
- *     `tui` field, then a discovered `src/tui/index.tsx`.
+ *   - WRAPPER, IDEMPOTENT, DERIVED FIRST, AND SKIPPED WHEN THERE IS NOTHING
+ *     TO WIRE. The tree's OWN target is derived BEFORE any existing file is
+ *     consulted, and `tui.tsx` is created ONLY when the tree lacks a loadable
+ *     USER-authored `tui.{ts,tsx}` - a file that exists but is a directory
+ *     does NOT count as loadable. A loadable user entry means no write, ever.
+ *     The wrapper re-exports the TREE'S OWN tui entry, derived in order from
+ *     the tree manifest: `exports["./tui"]` (import/default/require), a
+ *     top-level `tui` field, then a discovered `src/tui/index.tsx`.
+ *     A wrapper THIS module wrote carries `WRAPPER_MARKER` (or, for a file
+ *     the pre-derive 1.4.0 release wrote, the exact legacy bytes): it is ours
+ *     to heal, never evidence that the tree ships a TUI. Against the DERIVED
+ *     target it is removed when the target is `none`, and rewritten when the
+ *     target moved; a user-authored file is never deleted. A user-authored
+ *     root `tui.ts` beside a managed `tui.tsx` also takes the managed wrapper
+ *     out (Bun probes `.tsx` before `.ts`, so it would shadow the user's
+ *     entry) - and the tree stays wired through the user's own file.
  *     Three outcomes, deliberately distinct:
  *       - a derivable target -> the wrapper is written (or already there);
  *       - a tree that ships NO tui entry AT ALL (no declaration, no
- *         discovered `src/tui/index.tsx`, no loadable `tui.{ts,tsx}`) -> a
- *         clean SKIP: no wrapper, no cli.json entry, one informational row
- *         naming the tree. A tree without a TUI has nothing to wire, and a
- *         refusal would spam a warning on every reconciliation;
+ *         discovered `src/tui/index.tsx`, no loadable USER-authored
+ *         `tui.{ts,tsx}`) -> a clean SKIP: any managed wrapper is removed,
+ *         any managed cli.json entry for the tree is unwired, and one
+ *         informational row names the tree. A tree without a TUI has nothing
+ *         to wire, and a refusal would spam a warning on every reconciliation;
  *       - a DECLARED `./tui` target that is not a real file inside the tree,
  *         or a directory occupying the wrapper path -> a loud refusal. The
  *         manifest says a TUI entry exists, so either writing a hardcoded
@@ -49,7 +59,9 @@
  *     under our own markers, and the whole key it auto-created once the
  *     array is empty again - byte-preserving everything else. Entries that
  *     were present before wiring are never removed (an identical user entry
- *     is deduped at wire time and left unmarked). Returns true if anything
+ *     is deduped at wire time and left unmarked). A TARGETED unwire (`entry`
+ *     argument) claims only the marker that owns exactly that entry, so
+ *     healing one tree never unwires another. Returns true if anything
  *     changed, false if there is nothing of ours to do.
  *
  * The cli.json path is CALLER-PROVIDED: this module never guesses a config
@@ -61,9 +73,30 @@ import { readFileSync, statSync } from "node:fs"
 import { basename, dirname, isAbsolute, join, relative, resolve, sep } from "node:path"
 import { pathToFileURL } from "node:url"
 
+/**
+ * First line of a wrapper WE wrote: the same ownership marker cli.json uses,
+ * so a managed wrapper is identifiable without guessing from its shape.
+ */
+export const WRAPPER_MARKER = "// oc-bifrost: managed TUI entry"
+
+/**
+ * The exact bytes the pre-derive release (1.4.0, commit 890ce33) wrote for
+ * EVERY tree, before 1.4.1 (commit 31ffd11) derived the target from the
+ * manifest. Unmarked, but ours: nothing else writes a hardcoded
+ * `src/tui/index.tsx` re-export. The match is byte-exact, so it is
+ * line-ending sensitive: a CRLF-converted legacy wrapper is conservatively
+ * treated as a user file - no heal, no harm.
+ */
+const LEGACY_WRAPPER_CONTENT = 'export { default } from "./src/tui/index.tsx";\n'
+
 /** The `tui.tsx` re-export body for a tree-relative `target` (e.g. `src/tui/index.tsx`). */
 export function wrapperContent(target: string): string {
-  return `export { default } from "./${target.replace(/^\.\//, "")}";\n`
+  return `${WRAPPER_MARKER}\n` + `export { default } from "./${target.replace(/^\.\//, "")}";\n`
+}
+
+/** Whether `content` is a wrapper this module wrote (marked, or the exact pre-derive artifact). */
+function isManagedWrapper(content: string): boolean {
+  return content.startsWith(`${WRAPPER_MARKER}\n`) || content === LEGACY_WRAPPER_CONTENT
 }
 
 /** Inside an array WE created: marks the whole key as ours to remove. */
@@ -298,6 +331,39 @@ function markerKind(commentText: string): "created" | "entry" | null {
 }
 
 /**
+ * The VALUE of a string token, whatever its spelling: the tokenizer accepts
+ * JSONC's single-quoted strings, so ownership matching must compare parsed
+ * values, not raw token text. Null for a malformed literal (never a match).
+ */
+function stringValue(text: string): string | null {
+  const quote = text[0]
+  if ((quote !== '"' && quote !== "'") || text.length < 2 || text[text.length - 1] !== quote) return null
+  const simple: Record<string, string> = { '"': '"', "'": "'", "\\": "\\", "/": "/", b: "\b", f: "\f", n: "\n", r: "\r", t: "\t" }
+  let out = ""
+  for (let i = 1; i < text.length - 1; i++) {
+    const c = text[i]!
+    if (c !== "\\") {
+      out += c
+      continue
+    }
+    i++
+    const e = text[i]
+    if (e === undefined) return null
+    if (e === "u") {
+      const hex = text.slice(i + 1, i + 5)
+      if (!/^[0-9a-fA-F]{4}$/.test(hex)) return null
+      out += String.fromCharCode(parseInt(hex, 16))
+      i += 4
+      continue
+    }
+    const decoded = simple[e]
+    if (decoded === undefined) return null
+    out += decoded
+  }
+  return out
+}
+
+/**
  * Pure merge: splice ONLY the top-level `plugins` key. Returns null when
  * nothing changes (the exact entry already exists - dedupe), the new text
  * otherwise.
@@ -364,9 +430,11 @@ function mergePluginsEntry(text: string, entry: string, path: string): string | 
 
 /**
  * Pure unwire: remove only what we added, byte-preserving everything else.
- * Returns null when there is nothing of ours to remove.
+ * With `onlyEntry`, a managed marker is claimed only when it owns exactly that
+ * entry (another tree's managed entry is left alone). Returns null when there
+ * is nothing of ours to remove.
  */
-function unmergePlugins(text: string, path: string): string | null {
+function unmergePlugins(text: string, path: string, onlyEntry?: string): string | null {
   const toks = tokenize(text, path)
   validateTopObject(text, toks, path)
   const seg = locatePlugins(toks, path)
@@ -388,10 +456,14 @@ function unmergePlugins(text: string, path: string): string | null {
     if (depth !== 1 || t.kind !== "comment") continue
     const kind = markerKind(t.text)
     if (!kind) continue
-    if (kind === "created") createdSeen = true
     // Our marker's entry is the next string with only whitespace between.
     let j = i + 1
     while (j < endIdx && toks[j]!.kind === "ws") j++
+    const candidate = toks[j]
+    // A targeted unwire claims only the marker that owns the requested entry
+    // (compared by parsed value, so a single-quoted spelling matches too).
+    if (onlyEntry !== undefined && (!candidate || candidate.kind !== "string" || stringValue(candidate.text) !== onlyEntry)) continue
+    if (kind === "created") createdSeen = true
     // The marker's own line whitespace is ours too; a comma straight before
     // it is the separator we wrote (or one we take so the restored array
     // keeps no dangling separator); anything else ends our ownership.
@@ -408,7 +480,6 @@ function unmergePlugins(text: string, path: string): string | null {
     if (ownsLeading) spanStart = prev.start
     else if (prev) spanStart = prev.end
     let spanEnd = t.end
-    const candidate = toks[j]
     if (candidate && candidate.kind === "string") {
       spanEnd = candidate.end
       let k = j + 1
@@ -651,28 +722,101 @@ function tuiTarget(treeDir: string): TuiTarget {
 
 /**
  * The wrapper step's outcome: `wrapped` (this call wrote it), `present` (a
- * loadable entry already exists - no write, ever), or `absent` (the tree ships
- * no TUI entry at all - the caller skips the whole wire cleanly).
+ * loadable entry already exists - no write, ever), `absent` (the tree ships
+ * no TUI entry at all - the caller skips the whole wire cleanly), or
+ * `stale-removed` (the tree ships no TUI entry and a wrapper an earlier
+ * version managed was removed - the caller skips AND unwires).
  */
-type WrapperStep = { kind: "wrapped"; wrapper: string } | { kind: "present" } | { kind: "absent" }
+type WrapperStep =
+  | { kind: "wrapped"; wrapper: string }
+  | { kind: "present" }
+  | { kind: "absent" }
+  | { kind: "stale-removed" }
+
+/** Remove a wrapper this module owns. Loud on failure, never silent. */
+async function removeManagedWrapper(wrapperPath: string): Promise<void> {
+  try {
+    await unlink(wrapperPath)
+  } catch (e) {
+    throw new Error(
+      `[oc-bifrost] refusing to remove the stale managed TUI wrapper ${wrapperPath}: ${e instanceof Error ? e.message : String(e)}`,
+    )
+  }
+}
 
 async function ensureWrapper(treeDir: string): Promise<WrapperStep> {
   const wrapperPath = join(treeDir, "tui.tsx")
-  let blockedByDirectory = false
-  for (const name of ["tui.ts", "tui.tsx"]) {
-    let st
-    try {
-      st = statSync(join(treeDir, name))
-    } catch {
-      continue // absent: not loadable
+
+  // Derive the tree's OWN target FIRST. A wrapper is never evidence that the
+  // tree ships a TUI entry - only the manifest/discovery may say that.
+  const target = tuiTarget(treeDir)
+
+  // Read the wrapper path ONCE: our own wrapper (marked, or the exact legacy
+  // bytes) is ours to heal; any other file there is a user's entry.
+  let wrapperIsFile = false
+  let existingWrapper: string | null = null
+  try {
+    wrapperIsFile = statSync(wrapperPath).isFile()
+    if (wrapperIsFile) existingWrapper = readFileSync(wrapperPath, "utf8")
+  } catch {
+    // absent, or unreadable: not ours to touch
+  }
+  const managedWrapper = existingWrapper !== null && isManagedWrapper(existingWrapper)
+
+  // A genuine USER-authored entry file is loadable as-is: never written,
+  // never deleted, and its tree stays registered. `tui.ts` cannot be ours -
+  // this module only ever writes `tui.tsx`.
+  let userTs = false
+  try {
+    userTs = statSync(join(treeDir, "tui.ts")).isFile()
+  } catch {
+    userTs = false // absent (or unreadable): not loadable
+  }
+  if (userTs) {
+    // The host probes root `tui` by extension; Bun probes `.tsx` BEFORE `.ts`
+    // (`Bun.resolveSync`, packages/util/src/runtime/import.bun.ts:8), so a
+    // managed `tui.tsx` would SHADOW the user's entry, while the Node runtime
+    // probes `.ts` first (import.node.ts:41). Removing only OUR wrapper makes
+    // the resolved entry the user's file under both.
+    if (managedWrapper) await removeManagedWrapper(wrapperPath)
+    return { kind: "present" }
+  }
+
+  // A wrapper WE wrote is ours to heal: remove it when the tree ships no TUI
+  // entry, rewrite it when the derived target moved.
+  if (managedWrapper) {
+    if (target.kind === "none") {
+      await removeManagedWrapper(wrapperPath)
+      return { kind: "stale-removed" }
     }
-    if (st.isFile()) return { kind: "present" } // a loadable entry already exists
-    if (name === "tui.tsx" && st.isDirectory()) blockedByDirectory = true
+    if (target.kind === "declared-missing") {
+      throw new Error(
+        `[oc-bifrost] refusing to rewrite TUI wrapper ${wrapperPath}: the tree declares "./tui" at ` +
+          `"${target.declared}", which is not a real file inside ${treeDir}`,
+      )
+    }
+    const desired = wrapperContent(target.target)
+    if (existingWrapper === desired) return { kind: "present" } // idempotent: nothing to write
+    try {
+      await writeFile(wrapperPath, desired, "utf8")
+    } catch (e) {
+      throw new Error(
+        `[oc-bifrost] refusing to rewrite TUI wrapper ${wrapperPath}: ${e instanceof Error ? e.message : String(e)}`,
+      )
+    }
+    return { kind: "wrapped", wrapper: wrapperPath }
+  }
+  if (wrapperIsFile) return { kind: "present" } // a user-authored (or unreadable) tui.tsx
+
+  let blockedByDirectory = false
+  try {
+    blockedByDirectory = statSync(wrapperPath).isDirectory()
+  } catch {
+    blockedByDirectory = false // absent: nothing blocks creation
   }
   if (blockedByDirectory) {
     throw new Error(`[oc-bifrost] refusing to create TUI wrapper ${wrapperPath}: a directory occupies that path`)
   }
-  const target = tuiTarget(treeDir)
   if (target.kind === "none") return { kind: "absent" }
   if (target.kind === "declared-missing") {
     throw new Error(
@@ -695,25 +839,76 @@ async function ensureWrapper(treeDir: string): Promise<WrapperStep> {
  *   - `wired`   - the tree's `file://` URL is in cli.json; `wrapper` is the
  *                 wrapper this call wrote, or null when a loadable entry
  *                 already existed;
- *   - `skipped` - the tree ships no TUI entry, so NOTHING was written (no
- *                 wrapper, no cli.json entry). `reason` is the informational
- *                 row for the caller: not a refusal, not a warning.
+ *   - `skipped` - the tree ships no TUI entry, so no wrapper and no cli.json
+ *                 entry survive the call: a managed wrapper left by an
+ *                 earlier version is removed and a managed cli.json entry for
+ *                 the tree is unwired. `reason` is the informational row for
+ *                 the caller: not a refusal, not a warning.
  */
 export type WireTuiOutcome =
   | { kind: "wired"; wrapper: string | null; entry: string }
   | { kind: "skipped"; reason: string }
 
 /**
+ * Whether cli.json already carries this exact tree entry (managed or not).
+ * A parsed probe: entries are matched by VALUE, so a single-quoted spelling
+ * counts, and the skip/heal path never claims an unwire it did not do. It
+ * never validates or edits: an unreadable or malformed file reports "not
+ * registered", so a tree unrelated to it still skips instead of refusing.
+ */
+async function treeIsRegistered(cliJsonPath: string, entry: string): Promise<boolean> {
+  let text: string
+  try {
+    text = await readFile(cliJsonPath, "utf8")
+  } catch {
+    return false
+  }
+  try {
+    const toks = tokenize(text, cliJsonPath)
+    validateTopObject(text, toks, cliJsonPath)
+    const seg = locatePlugins(toks, cliJsonPath)
+    if (!seg) return false
+    const startIdx = indexOfTok(toks, seg.openTok)
+    const endIdx = indexOfTok(toks, seg.closeTok)
+    let depth = 1
+    for (let i = startIdx + 1; i < endIdx; i++) {
+      const t = toks[i]!
+      if (t.kind === "bracket") {
+        depth += t.text === "{" || t.text === "[" ? 1 : -1
+        continue
+      }
+      if (depth === 1 && t.kind === "string" && stringValue(t.text) === entry) return true
+    }
+    return false
+  } catch {
+    return false // malformed or unreadable: nothing to claim, never a refusal (probe only)
+  }
+}
+
+/**
  * Wire a provisioned tree's TUI entry: ensure the root wrapper, then add the
  * tree (as a `file://` URL) to the plugins array of the caller-provided
  * cli.json, byte-preserving everything else (see the module contract). A tree
- * that ships no TUI entry at all is a clean skip: nothing is written and
- * cli.json is never opened.
+ * that ships no TUI entry at all is a clean skip: a stale managed wrapper is
+ * removed, a stale managed cli.json entry for the tree is unwired, and
+ * nothing else is written.
  */
 export async function wireTui(treeDir: string, cliJsonPath: string): Promise<WireTuiOutcome> {
   const step = await ensureWrapper(treeDir)
-  if (step.kind === "absent") {
-    return { kind: "skipped", reason: `no TUI entry found in ${treeDir}; nothing to wire` }
+  if (step.kind === "absent" || step.kind === "stale-removed") {
+    // Nothing to wire. A tree an earlier version registered before deriving
+    // the target first is taken back out - TARGETED at this tree's own entry,
+    // so another tree's managed entry is never touched.
+    const entry = pathToFileURL(treeDir).href
+    const unwired = (await treeIsRegistered(cliJsonPath, entry)) && (await unwireTui(cliJsonPath, entry))
+    return {
+      kind: "skipped",
+      reason:
+        step.kind === "stale-removed"
+          ? `no TUI entry found in ${treeDir}; removed the stale managed tui.tsx` +
+            (unwired ? " and unwired the tree" : "; no managed cli.json entry was unwired")
+          : `no TUI entry found in ${treeDir}; nothing to wire`,
+    }
   }
   const entry = pathToFileURL(treeDir).href
   await readMergeWriteStable(cliJsonPath, "refuse", (text) => mergePluginsEntry(text, entry, cliJsonPath))
@@ -721,9 +916,11 @@ export async function wireTui(treeDir: string, cliJsonPath: string): Promise<Wir
 }
 
 /**
- * Remove only what wireTui added from the caller-provided cli.json. Returns
+ * Remove only what wireTui added from the caller-provided cli.json. With
+ * `entry`, remove only that exact tree's managed entry (another tree's managed
+ * entry is never touched); without it, remove every managed entry. Returns
  * true when anything changed, false when there is nothing of ours to do.
  */
-export async function unwireTui(cliJsonPath: string): Promise<boolean> {
-  return readMergeWriteStable(cliJsonPath, "noop", (text) => unmergePlugins(text, cliJsonPath))
+export async function unwireTui(cliJsonPath: string, entry?: string): Promise<boolean> {
+  return readMergeWriteStable(cliJsonPath, "noop", (text) => unmergePlugins(text, cliJsonPath, entry))
 }

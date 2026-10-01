@@ -255,7 +255,11 @@ test("wireTui: true wires a mounted github: snapshot into the caller-provided cl
       assert.ok(wired.includes("oc-bifrost: managed TUI entry"), "the entry must carry the ownership marker")
       const wrapper = path.join(treeDir, "tui.tsx")
       assert.ok(fs.existsSync(wrapper), "the tui.tsx wrapper must be created at the tree root")
-      assert.equal(fs.readFileSync(wrapper, "utf8"), 'export { default } from "./src/tui/index.tsx";\n')
+      assert.equal(
+        fs.readFileSync(wrapper, "utf8"),
+        '// oc-bifrost: managed TUI entry\nexport { default } from "./src/tui/index.tsx";\n',
+        "the managed wrapper must re-export the tree's derived entry and carry the ownership marker",
+      )
 
       await cleanup()
     })

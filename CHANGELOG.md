@@ -1,5 +1,41 @@
 # Changelog
 
+## 1.4.3 (2026-10-01)
+
+### Fixed
+
+- **A managed `tui.tsx` wrapper is now healed, not trusted** (`src/wire-tui.ts`).
+  Trees wired by the pre-derive release carry a hardcoded
+  `export { default } from "./src/tui/index.tsx"` wrapper even when the package
+  ships no `src/tui/index.tsx`; the TUI client then fails at `stage=read` with
+  `Cannot find module './src/tui/index.tsx'`, which the host surfaces as a
+  misleading "Plugin failed" toast and a failed count in the footer -
+  `rtk-ai/rtk`, `obra/superpowers`, and `d3vv3/opencode-ascii` were affected;
+  `nathwn12/oc-flight-deck` was unaffected, because its package genuinely ships
+  `src/tui/index.tsx`. 1.4.2 fixed the cold path only: an already-fetched
+  (warm-cache) tree keeps its stale wrapper, so 1.4.3 heals it on the next
+  reconciliation.
+- **The wrapper target is derived BEFORE any existing wrapper file is
+  consulted** (`src/wire-tui.ts`). A tree with no derivable `./tui` target is
+  skipped cleanly - no wrapper and no `cli.json` entry - instead of being wired
+  through a wrapper that cannot resolve.
+- **A wrapper this module wrote is ours to heal.** It is identified by its
+  ownership marker, or by the exact bytes the pre-derive release wrote; it is
+  removed when there is no derivable target, and rewritten when the target
+  moved. A user-authored `tui.ts` / `tui.tsx` is never deleted or rewritten,
+  and a managed `tui.tsx` that would shadow a user's `tui.ts` is removed -
+  under Bun, `.tsx` resolves before `.ts`, and the host resolves a directory
+  target as `path.resolve(dir, "tui")` with no `exports` consultation - so the
+  tree stays wired through the user's own file.
+- **The heal unwires the tree it healed, and only that tree.** The
+  previously-dead `unwireTui` is now called with the healed tree's own
+  `file://` entry, so a managed `cli.json` entry is removed for that tree and
+  never for another.
+- **Managed `cli.json` entries are matched by parsed value**, so a
+  single-quoted or escape-spelled entry is still recognized as ours.
+- **The `skipped` row reports truthfully:** its reason claims an unwire only
+  when the unwire actually happened.
+
 ## 1.4.2 (2026-09-30)
 
 ### Changed

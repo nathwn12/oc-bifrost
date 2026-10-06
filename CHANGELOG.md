@@ -1,5 +1,23 @@
 # Changelog
 
+## 1.4.4 (2026-10-06)
+
+### Fixed
+
+- **A re-provisioned plugin no longer accumulates duplicate `cli.json` entries**
+  (`src/wire-tui.ts`, `src/index.ts`, `src/github.ts`). The managed TUI entry is
+  a `file://` URL into a cache dir whose name embeds the resolved ref/commit, so
+  a new commit minted a new URL that the exact-string dedupe never matched - the
+  previous managed entry was left behind and one more was appended per resolved
+  ref (observed live: five `nathwn12--oc-flight-deck--<commit>--...` trees, five
+  entries). A managed entry now carries a ref-independent plugin key in its
+  marker (`sha256(owner\0repo\0path)[0:16]`); before adding the new entry, the
+  mount path removes the previous managed entry for that key, and the append
+  dedupe compares parsed values. Entries written before this release are
+  migrated by an exact canonical-shape match (equal 4-segment cache-dir names on
+  owner, repo, and the digest-stripped tail). User entries and other plugins'
+  managed entries are never removed.
+
 ## 1.4.3 (2026-10-01)
 
 ### Fixed

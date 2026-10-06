@@ -446,6 +446,30 @@ export function githubCacheId(spec: GithubSpec): string {
 }
 
 /**
+ * The STABLE prefix of that spec's cache directory name: `owner--repo--`,
+ * independent of the resolved ref, path, and digest. A tree's cli.json entry
+ * URL always contains `/<family>` (the cache dir name begins with it), so a
+ * re-provision at a new resolved ref - a new cache dir and a new URL - is
+ * still recognizable as the SAME plugin and its previous entry can be pruned.
+ */
+export function githubCacheRepoPrefix(spec: Pick<GithubSpec, "owner" | "repo">): string {
+  return `${sanitizeSegment(spec.owner)}--${sanitizeSegment(spec.repo)}--`
+}
+
+/**
+ * The stable, ref-independent identity of the plugin a spec names: a sha256
+ * over owner/repo/path. The cache directory name is ref-bearing (it changes
+ * with every resolved commit), so it cannot serve as identity; this key is
+ * recorded in the managed cli.json entry marker and claimed exactly.
+ */
+export function githubPluginKey(spec: Pick<GithubSpec, "owner" | "repo" | "path">): string {
+  return createHash("sha256")
+    .update([spec.owner, spec.repo, spec.path ?? ""].join("\u0000"), "utf8")
+    .digest("hex")
+    .slice(0, 16)
+}
+
+/**
  * The layout-versioned cache root. Directory versioning is what keeps a flat
  * single-file cache written by an earlier oc-bifrost (`<root>/<id>`) from ever
  * being read as if it were a materialized snapshot: the new code only looks

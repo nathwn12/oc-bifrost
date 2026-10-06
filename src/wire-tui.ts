@@ -38,11 +38,26 @@
  *     ONLY the top-level `plugins` key: `$schema`, comments, every other
  *     key, and their exact formatting survive byte-for-byte. Entry form is
  *     exactly `url.pathToFileURL(treeDir).href` (forward slashes - the live,
- *     load-verified entry form); dedupe is by that exact string. When the
+ *     load-verified entry form); dedupe is by the PARSED entry value, so a
+ *     differently-spelled (single-quoted) copy still counts. When the
  *     key is absent it is created in a safe position (after `$schema`, or at
  *     the top of the object) with a byte marker identifying it as ours; when
  *     it exists, our entry is appended with its own inline marker and the
- *     user's entries and layout are preserved as-is.
+ *     user's entries and layout are preserved as-is. A managed entry marker
+ *     carries the plugin's stable key (`[<key>]`) when it is known.
+ *   - PRUNE-PREVIOUS-ENTRY (`opts.pluginKey` / `opts.treeFamily`). A
+ *     re-provision at a new resolved ref lands in a NEW cache dir, so the
+ *     tree's `file://` URL changes and the old entry would otherwise linger
+ *     beside the new one. Identity is claimed from the marker WE own, not the
+ *     URL: a block keyed with `pluginKey` is pruned exactly (but never the
+ *     entry being written, so repeat mounts are byte-stable), a block keyed
+ *     differently is never claimed, and a legacy keyless block is claimed
+ *     only on an exact canonical-shape match (same owner, repo, and
+ *     digest-stripped path tail) - which is what keeps `oc-flight-deck` from
+ *     claiming `oc-flight-deck--extra`. Any non-canonical name (`--` inside a
+ *     raw part) is left alone. With neither a key nor a family, nothing is
+ *     pruned. Only marker-owned blocks are ever pruned: a user entry is never
+ *     claimed.
  *   - CONCURRENT WRITER. The live client rewrites cli.json itself, so every
  *     write is guarded: the file's mtime is recorded before reading; if it
  *     changed before the write the file is re-read and re-merged - up to 3
@@ -71,7 +86,7 @@
 import { readFile, rename, stat, unlink, writeFile } from "node:fs/promises"
 import { readFileSync, statSync } from "node:fs"
 import { basename, dirname, isAbsolute, join, relative, resolve, sep } from "node:path"
-import { pathToFileURL } from "node:url"
+import { fileURLToPath, pathToFileURL } from "node:url"
 
 /**
  * First line of a wrapper WE wrote: the same ownership marker cli.json uses,
@@ -102,7 +117,12 @@ function isManagedWrapper(content: string): boolean {
 /** Inside an array WE created: marks the whole key as ours to remove. */
 export const CREATED_KEY_MARKER = "// oc-bifrost: managed TUI entry (key auto-created; safe to remove with it)"
 
-/** Immediately above one of OUR entries inside an otherwise user-owned array. */
+/**
+ * Immediately above one of OUR entries inside an otherwise user-owned array.
+ * When the plugin's stable key is known the marker line carries it as
+ * `// oc-bifrost: managed TUI entry [<key>]`; the bare form stays valid for
+ * entries written before keys existed.
+ */
 export const ENTRY_MARKER = "// oc-bifrost: managed TUI entry"
 
 const MAX_ATTEMPTS = 3
@@ -322,12 +342,30 @@ function indexOfTok(toks: Tok[], target: Tok): number {
   return -1
 }
 
+function cleanComment(raw: string): string {
+  return raw.replace(/^\/\//, "").trim()
+}
+
+/**
+ * Marker ownership of a comment token. The exact auto-created-key marker is
+ * checked FIRST (it shares the `managed TUI entry` prefix); an entry marker is
+ * the bare form or the keyed form `managed TUI entry [<key>]`.
+ */
 function markerKind(commentText: string): "created" | "entry" | null {
-  const clean = (raw: string): string => raw.replace(/^\/\//, "").trim()
-  const c = clean(commentText)
-  if (c === clean(CREATED_KEY_MARKER)) return "created"
-  if (c === clean(ENTRY_MARKER)) return "entry"
+  const c = cleanComment(commentText)
+  if (c === cleanComment(CREATED_KEY_MARKER)) return "created"
+  const entry = cleanComment(ENTRY_MARKER)
+  if (c === entry || c.startsWith(`${entry} [`)) return "entry"
   return null
+}
+
+/** The key carried by a keyed entry marker (`... [<key>]`), or null for a bare/legacy marker. */
+function markerKey(commentText: string): string | null {
+  const c = cleanComment(commentText)
+  const prefix = `${cleanComment(ENTRY_MARKER)} [`
+  if (!c.startsWith(prefix) || !c.endsWith("]")) return null
+  const key = c.slice(prefix.length, c.length - 1)
+  return key === "" ? null : key
 }
 
 /**
@@ -366,13 +404,14 @@ function stringValue(text: string): string | null {
 /**
  * Pure merge: splice ONLY the top-level `plugins` key. Returns null when
  * nothing changes (the exact entry already exists - dedupe), the new text
- * otherwise.
+ * otherwise. When `key` is given the managed entry marker carries it.
  */
-function mergePluginsEntry(text: string, entry: string, path: string): string | null {
+function mergePluginsEntry(text: string, entry: string, path: string, key?: string): string | null {
   const toks = tokenize(text, path)
   validateTopObject(text, toks, path)
   const seg = locatePlugins(toks, path)
   const quoted = JSON.stringify(entry)
+  const marker = key === undefined ? ENTRY_MARKER : `${ENTRY_MARKER} [${key}]`
   const braceTok = toks[skipWsAndComments(toks, 0)]!
   const ind2 = detectIndent(text, braceTok.end) + FALLBACK_INDENT
 
@@ -388,23 +427,25 @@ function mergePluginsEntry(text: string, entry: string, path: string): string | 
         continue
       }
       if (depth !== 1) continue
-      if (t.kind === "string" && t.text === quoted) return null // dedupe by exact string
+      if (t.kind === "string" && stringValue(t.text) === entry) return null // dedupe by parsed value
       if (t.kind !== "ws" && t.kind !== "comment") lastSig = t
     }
     let unit: string
     if (!lastSig) {
-      unit = `${ENTRY_MARKER}\n${quoted}` // byte-exact restorable empty array: [// marker\n"entry"]
+      unit = `${marker}\n${quoted}` // byte-exact restorable empty array: [// marker\n"entry"]
     } else if (lastSig.kind === "comma") {
-      unit = `\n${ind2}${ENTRY_MARKER}\n${ind2}${quoted}`
+      unit = `\n${ind2}${marker}\n${ind2}${quoted}`
     } else {
-      unit = `,\n${ind2}${ENTRY_MARKER}\n${ind2}${quoted}`
+      unit = `,\n${ind2}${marker}\n${ind2}${quoted}`
     }
     return text.slice(0, seg.closeTok.start) + unit + text.slice(seg.closeTok.start)
   }
 
-  // No plugins key: create one at a safe position, marked as ours.
+  // No plugins key: create one at a safe position, marked as ours. The keyed
+  // entry marker rides along so a later re-provision can prune exactly.
   const ind = detectIndent(text, braceTok.end)
-  const unitBody = `\n${ind}"plugins": [\n${ind}${FALLBACK_INDENT}${CREATED_KEY_MARKER}\n${ind}${FALLBACK_INDENT}${quoted}\n${ind}]`
+  const entryLine = key === undefined ? quoted : `${marker}\n${ind}${FALLBACK_INDENT}${quoted}`
+  const unitBody = `\n${ind}"plugins": [\n${ind}${FALLBACK_INDENT}${CREATED_KEY_MARKER}\n${ind}${FALLBACK_INDENT}${entryLine}\n${ind}]`
   const schema = locateSchema(toks, path)
   let at: number
   let sep = ""
@@ -430,11 +471,16 @@ function mergePluginsEntry(text: string, entry: string, path: string): string | 
 
 /**
  * Pure unwire: remove only what we added, byte-preserving everything else.
- * With `onlyEntry`, a managed marker is claimed only when it owns exactly that
- * entry (another tree's managed entry is left alone). Returns null when there
- * is nothing of ours to remove.
+ * With `claim`, a managed marker is claimed only when the entry it owns
+ * satisfies the predicate (which receives the parsed entry value and the
+ * marker's key, if any); without it, every managed entry is removed. Returns
+ * null when there is nothing of ours to remove.
  */
-function unmergePlugins(text: string, path: string, onlyEntry?: string): string | null {
+function unmergePlugins(
+  text: string,
+  path: string,
+  claim?: (value: string, key: string | null) => boolean,
+): string | null {
   const toks = tokenize(text, path)
   validateTopObject(text, toks, path)
   const seg = locatePlugins(toks, path)
@@ -460,9 +506,14 @@ function unmergePlugins(text: string, path: string, onlyEntry?: string): string 
     let j = i + 1
     while (j < endIdx && toks[j]!.kind === "ws") j++
     const candidate = toks[j]
-    // A targeted unwire claims only the marker that owns the requested entry
-    // (compared by parsed value, so a single-quoted spelling matches too).
-    if (onlyEntry !== undefined && (!candidate || candidate.kind !== "string" || stringValue(candidate.text) !== onlyEntry)) continue
+    // A claimed unwire claims only the marker whose owned entry satisfies the
+    // predicate (which sees the parsed value, so a single-quoted spelling
+    // matches, and the marker's key); without a claim every managed marker is
+    // ours.
+    if (claim !== undefined) {
+      const value = candidate && candidate.kind === "string" ? stringValue(candidate.text) : null
+      if (value === null || !claim(value, markerKey(t.text))) continue
+    }
     if (kind === "created") createdSeen = true
     // The marker's own line whitespace is ours too; a comma straight before
     // it is the separator we wrote (or one we take so the restored array
@@ -493,7 +544,11 @@ function unmergePlugins(text: string, path: string, onlyEntry?: string): string 
     // An orphan marker line is removed alone (we own it either way).
     spans.push([spanStart, spanEnd])
     removedAny = true
-    i = j
+    // Resume AT a non-entry candidate (a consecutive marker, e.g. the
+    // auto-created key marker directly above the keyed entry marker) so it is
+    // processed on its own; when the candidate WAS the owned entry string, `j`
+    // is already past it.
+    i = candidate && candidate.kind === "string" ? j : j - 1
   }
   if (!removedAny) return null
 
@@ -886,14 +941,82 @@ async function treeIsRegistered(cliJsonPath: string, entry: string): Promise<boo
 }
 
 /**
+ * The `--`-split segments of the cache-directory name a tree `file://` URL
+ * points into (`<cacheDir>/tree`): the canonical name is
+ * `<owner>--<repo>--<ref>--<path>-<digest>`. Null when the URL is not usable.
+ */
+function cacheDirSegments(fileUrl: string): string[] | null {
+  try {
+    return basename(dirname(fileURLToPath(fileUrl))).split("--")
+  } catch {
+    return null
+  }
+}
+
+/** The trailing 16-hex-char content digest stripped from a cache name's last segment. */
+function stripCacheDigest(segment: string): string {
+  return segment.replace(/-[0-9a-f]{16}$/, "")
+}
+
+/**
+ * Pure prune of the previous MANAGED entries for the SAME plugin. Identity is
+ * claimed from the marker we own, never from the URL:
+ *   - a KEYED block is claimed when its key equals `pluginKey` AND it is not
+ *     the entry we are about to write, so a repeat mount is byte-stable;
+ *   - a block keyed differently is never claimed;
+ *   - a keyless block (legacy, pre-key) is claimed only on an EXACT shape
+ *     match: both cache names canonical (4 `--`-segments), same owner
+ *     (index 0), same repo (index 1), and the same digest-stripped last
+ *     segment. With our own name canonical the only free token is then
+ *     `--<ref>--`, so a name matching owner, repo and the digest-stripped
+ *     tail IS this plugin at a different resolved ref - a different plugin
+ *     cannot share owner, repo AND path. Anything not matching is left alone
+ *     (a stale entry lingers - safe).
+ * With neither a key nor a family there is nothing safe to claim: no prune.
+ * A user (unmarked) entry is never visible here at all.
+ */
+function prunePreviousManaged(
+  text: string,
+  path: string,
+  entry: string,
+  treeFamily: string | undefined,
+  pluginKey: string | undefined,
+): string {
+  const family = treeFamily ?? ""
+  const keyId = pluginKey ?? ""
+  if (family === "" && keyId === "") return text
+  const ours = cacheDirSegments(entry)
+  const claim = (value: string, key: string | null): boolean => {
+    if (key !== null) return keyId !== "" && key === keyId && value !== entry
+    if (value === entry || !value.startsWith("file://")) return false
+    if (family === "" || !value.includes(`/${family}`)) return false
+    // Canonical shape only: a `--` inside any raw part inflates the count and
+    // makes us SKIP the fallback (conservative - never over-claim).
+    if (!ours || ours.length !== 4) return false
+    const cand = cacheDirSegments(value)
+    if (!cand || cand.length !== 4) return false
+    if (cand[0] !== ours[0] || cand[1] !== ours[1]) return false
+    return stripCacheDigest(cand[3]!) === stripCacheDigest(ours[3]!)
+  }
+  return unmergePlugins(text, path, claim) ?? text
+}
+
+/**
  * Wire a provisioned tree's TUI entry: ensure the root wrapper, then add the
  * tree (as a `file://` URL) to the plugins array of the caller-provided
  * cli.json, byte-preserving everything else (see the module contract). A tree
  * that ships no TUI entry at all is a clean skip: a stale managed wrapper is
  * removed, a stale managed cli.json entry for the tree is unwired, and
- * nothing else is written.
+ * nothing else is written. When `opts.pluginKey` / `opts.treeFamily` identify
+ * the plugin, its previous MANAGED entries are pruned (by exact key, or by a
+ * guarded URL fallback for legacy keyless entries) before the new entry is
+ * merged.
  */
-export async function wireTui(treeDir: string, cliJsonPath: string): Promise<WireTuiOutcome> {
+export async function wireTui(
+  treeDir: string,
+  cliJsonPath: string,
+  opts?: { treeFamily?: string; pluginKey?: string },
+): Promise<WireTuiOutcome> {
   const step = await ensureWrapper(treeDir)
   if (step.kind === "absent" || step.kind === "stale-removed") {
     // Nothing to wire. A tree an earlier version registered before deriving
@@ -911,7 +1034,17 @@ export async function wireTui(treeDir: string, cliJsonPath: string): Promise<Wir
     }
   }
   const entry = pathToFileURL(treeDir).href
-  await readMergeWriteStable(cliJsonPath, "refuse", (text) => mergePluginsEntry(text, entry, cliJsonPath))
+  await readMergeWriteStable(cliJsonPath, "refuse", (text) => {
+    // A re-provision at a new resolved ref lands in a NEW cache dir, so the
+    // tree's `file://` URL changes and the previous entry would otherwise
+    // linger beside the new one. Prune the previous MANAGED entry/entries for
+    // the SAME plugin first (a pure transform), then merge the new entry.
+    // A user entry is never claimed.
+    const pruned = prunePreviousManaged(text, cliJsonPath, entry, opts?.treeFamily, opts?.pluginKey)
+    const merged = mergePluginsEntry(pruned, entry, cliJsonPath, opts?.pluginKey)
+    if (merged !== null) return merged
+    return pruned === text ? null : pruned
+  })
   return { kind: "wired", wrapper: step.kind === "wrapped" ? step.wrapper : null, entry }
 }
 
@@ -922,5 +1055,7 @@ export async function wireTui(treeDir: string, cliJsonPath: string): Promise<Wir
  * true when anything changed, false when there is nothing of ours to do.
  */
 export async function unwireTui(cliJsonPath: string, entry?: string): Promise<boolean> {
-  return readMergeWriteStable(cliJsonPath, "noop", (text) => unmergePlugins(text, cliJsonPath, entry))
+  return readMergeWriteStable(cliJsonPath, "noop", (text) =>
+    unmergePlugins(text, cliJsonPath, entry === undefined ? undefined : (value) => value === entry),
+  )
 }

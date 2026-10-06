@@ -107,6 +107,17 @@ function writeCli(root, content) {
   return cli
 }
 
+/** Parse a cli.json carrying `//`-comment markers by stripping comment lines. */
+function readCliJson(cli) {
+  return JSON.parse(
+    fs
+      .readFileSync(cli, "utf8")
+      .split("\n")
+      .filter((line) => !line.trim().startsWith("//"))
+      .join("\n"),
+  )
+}
+
 /* ---- wrapper ---- */
 
 test("wireTui: creates the tui.tsx wrapper re-exporting the tree's own exports[\"./tui\"] target", async () => {
@@ -944,6 +955,428 @@ test("wireTui and unwireTui: refuse loudly on a file that is not a balanced JSON
       )
       assert.equal(fs.readFileSync(cli, "utf8"), before, "a refused file must never be written")
     }
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true })
+  }
+})
+
+/* ---- family prune: re-provisioning a plugin replaces its previous managed entry ---- */
+
+test("wireTui: prune-then-add replaces the previous managed entry for the same plugin family", async () => {
+  const root = tmpRoot()
+  try {
+    const oldTree = writeTreeAt(path.join(root, "github", "v2", "acme--widget--commitA--default-0123456789abcdef", "tree"))
+    const newTree = writeTreeAt(path.join(root, "github", "v2", "acme--widget--commitB--default-fedcba9876543210", "tree"))
+    const otherTree = writeTreeAt(path.join(root, "github", "v2", "other--repo--commitX--default-0011223344556677", "tree"))
+    const oldEntry = pathToFileURL(oldTree).href
+    const newEntry = pathToFileURL(newTree).href
+    const otherEntry = pathToFileURL(otherTree).href
+    const before = [
+      "{",
+      '  "plugins": [',
+      '    "keep-me",',
+      `    ${ENTRY_MARKER}`,
+      `    "${otherEntry}",`,
+      `    ${ENTRY_MARKER}`,
+      `    "${oldEntry}"`,
+      "  ]",
+      "}",
+      "",
+    ].join("\n")
+    const cli = writeCli(root, before)
+
+    const out = await wireTui(newTree, cli, { treeFamily: "acme--widget--" })
+
+    assert.equal(out.kind, "wired")
+    assert.equal(out.entry, newEntry)
+    const after = fs.readFileSync(cli, "utf8")
+    const parsed = JSON.parse(
+      after
+        .split("\n")
+        .filter((line) => !line.trim().startsWith("//"))
+        .join("\n"),
+    )
+    const family = parsed.plugins.filter((p) => typeof p === "string" && p.includes("acme--widget--"))
+    assert.equal(family.length, 1, "exactly one acme--widget-- entry may remain")
+    assert.equal(family[0], newEntry, "the surviving family entry must be the NEW tree's URL")
+    assert.ok(parsed.plugins.includes("keep-me"), "the user entry must survive")
+    assert.ok(parsed.plugins.includes(otherEntry), "the other plugin's managed entry must survive")
+    assert.ok(
+      after.includes(`${ENTRY_MARKER}\n    "${otherEntry}"`),
+      "the other plugin's managed marker+entry block must be byte-intact",
+    )
+    assert.equal(after.split(ENTRY_MARKER).length - 1, 2, "only the other plugin's and the new managed markers may remain")
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true })
+  }
+})
+
+test("wireTui: a user (unmarked) entry inside the family is never pruned", async () => {
+  const root = tmpRoot()
+  try {
+    const oldTree = writeTreeAt(path.join(root, "github", "v2", "acme--widget--commitA--default-digestA", "tree"))
+    const newTree = writeTreeAt(path.join(root, "github", "v2", "acme--widget--commitB--default-digestB", "tree"))
+    const oldEntry = pathToFileURL(oldTree).href
+    const newEntry = pathToFileURL(newTree).href
+    const before = `{\n  "plugins": ["${oldEntry}"]\n}\n`
+    const cli = writeCli(root, before)
+
+    await wireTui(newTree, cli, { treeFamily: "acme--widget--" })
+
+    const after = fs.readFileSync(cli, "utf8")
+    assert.ok(after.includes(oldEntry), "a user entry in the family must never be claimed")
+    assert.ok(after.includes(newEntry), "the new managed entry must be added")
+    const parsed = JSON.parse(
+      after
+        .split("\n")
+        .filter((line) => !line.trim().startsWith("//"))
+        .join("\n"),
+    )
+    assert.deepEqual(parsed.plugins, [oldEntry, newEntry])
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true })
+  }
+})
+
+test("wireTui: dedupes the new entry by parsed value - a single-quoted copy is not duplicated", async () => {
+  const root = tmpRoot()
+  try {
+    const newTree = writeTreeAt(path.join(root, "github", "v2", "acme--widget--commitB--default-digestB", "tree"))
+    const newEntry = pathToFileURL(newTree).href
+    const before = `{\n  "plugins": ['${newEntry}']\n}\n`
+    const cli = writeCli(root, before)
+
+    await wireTui(newTree, cli, { treeFamily: "acme--widget--" })
+
+    const after = fs.readFileSync(cli, "utf8")
+    assert.equal(after, before, "an exact entry in any spelling must dedupe, writing no second copy")
+    assert.equal(after.split(newEntry).length - 1, 1, "exactly one copy of the entry may exist")
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true })
+  }
+})
+
+/* ---- identity in the marker: keyed prune + guarded legacy fallback ---- */
+
+test("wireTui: a repo whose name extends another's (widget vs widget--extra) is never pruned", async () => {
+  const root = tmpRoot()
+  try {
+    // The blocking counterexample: `acme--widget--extra--...` CONTAINS the
+    // family `acme--widget--`, so a raw substring test would delete the
+    // different plugin's managed entry. The `--`-segment guard must reject it.
+    const extraTree = writeTreeAt(
+      path.join(root, "github", "v2", "acme--widget--extra--commitX--default-digestX", "tree"),
+    )
+    const newTree = writeTreeAt(path.join(root, "github", "v2", "acme--widget--commitB--default-digestB", "tree"))
+    const extraEntry = pathToFileURL(extraTree).href
+    const newEntry = pathToFileURL(newTree).href
+    const before = `{\n  "plugins": [\n    ${ENTRY_MARKER}\n    "${extraEntry}"\n  ]\n}\n`
+    const cli = writeCli(root, before)
+
+    await wireTui(newTree, cli, { treeFamily: "acme--widget--", pluginKey: "keyWidget" })
+
+    const after = fs.readFileSync(cli, "utf8")
+    assert.ok(after.includes(extraEntry), "the other plugin's managed entry must SURVIVE")
+    assert.ok(
+      after.includes(`${ENTRY_MARKER}\n    "${extraEntry}"`),
+      "the other plugin's managed marker+entry block must be byte-intact",
+    )
+    assert.ok(after.includes(newEntry), "the new plugin's entry must be added")
+    assert.deepEqual(readCliJson(cli).plugins, [extraEntry, newEntry], "exactly the other entry and the new entry")
+    assert.ok(after.includes(`[keyWidget]`), "the new entry must carry its key")
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true })
+  }
+})
+
+test("wireTui: keyed replacement - a second mount at a new cache dir with the same key leaves exactly one entry", async () => {
+  const root = tmpRoot()
+  try {
+    const treeA = writeTreeAt(path.join(root, "github", "v2", "acme--widget--commitA--default-digestA", "tree"))
+    const treeB = writeTreeAt(path.join(root, "github", "v2", "acme--widget--commitB--default-digestB", "tree"))
+    const entryA = pathToFileURL(treeA).href
+    const entryB = pathToFileURL(treeB).href
+    const cli = writeCli(root, "{}")
+
+    await wireTui(treeA, cli, { treeFamily: "acme--widget--", pluginKey: "keyWidget" })
+    const afterFirst = fs.readFileSync(cli, "utf8")
+    assert.ok(afterFirst.includes(entryA))
+    assert.ok(afterFirst.includes(`[keyWidget]`), "the first entry must carry the key")
+
+    await wireTui(treeB, cli, { treeFamily: "acme--widget--", pluginKey: "keyWidget" })
+
+    const parsed = readCliJson(cli)
+    assert.deepEqual(parsed.plugins, [entryB], "exactly one entry may remain - the new URL")
+    const after = fs.readFileSync(cli, "utf8")
+    assert.ok(!after.includes(entryA), "the old URL must be pruned by exact key")
+    assert.equal(after.split(`[keyWidget]`).length - 1, 1, "exactly one keyed marker may remain")
+
+    // A keyed entry is still removable by the unchanged unwire semantics.
+    assert.equal(await unwireTui(cli), true)
+    assert.deepEqual(readCliJson(cli), {}, "untargeted unwire must remove the keyed entry and its created key")
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true })
+  }
+})
+
+test("wireTui: a keyless legacy flight-deck entry at a changed ref is pruned (exact-shape fallback)", async () => {
+  const root = tmpRoot()
+  try {
+    const treeA = writeTreeAt(
+      path.join(root, "github", "v2", "nathwn12--oc-flight-deck--commitA--src-index.ts-0123456789abcdef", "tree"),
+    )
+    const treeB = writeTreeAt(
+      path.join(root, "github", "v2", "nathwn12--oc-flight-deck--commitB--src-index.ts-fedcba9876543210", "tree"),
+    )
+    const entryA = pathToFileURL(treeA).href
+    const entryB = pathToFileURL(treeB).href
+    const before = `{\n  "plugins": [\n    ${ENTRY_MARKER}\n    "${entryA}"\n  ]\n}\n`
+    const cli = writeCli(root, before)
+
+    await wireTui(treeB, cli, { treeFamily: "nathwn12--oc-flight-deck--", pluginKey: "keyDeck" })
+
+    const parsed = readCliJson(cli)
+    assert.deepEqual(parsed.plugins, [entryB], "the stale keyless entry must be pruned and replaced")
+    assert.ok(!fs.readFileSync(cli, "utf8").includes(entryA), "the commitA URL must be gone")
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true })
+  }
+})
+
+test("wireTui: a keyed entry is pruned by exact key even when the family is absent from the URL (long owner+repo truncation)", async () => {
+  const root = tmpRoot()
+  try {
+    // The 96-char slice in githubCacheId can drop the owner--repo family from
+    // the cache-dir name entirely. A keyless fallback could then never match;
+    // a KEYED block is claimed by exact key, with no URL test at all.
+    const oldTree = writeTreeAt(path.join(root, "unrelated-cache-name-a", "tree"))
+    const newTree = writeTreeAt(path.join(root, "unrelated-cache-name-b", "tree"))
+    const oldEntry = pathToFileURL(oldTree).href
+    const newEntry = pathToFileURL(newTree).href
+    assert.ok(!oldEntry.includes("/verylongowner--verylongrepo--"), "the fixture deliberately omits the family")
+    const before = `{\n  "plugins": [\n    ${ENTRY_MARKER} [keyLong]\n    "${oldEntry}"\n  ]\n}\n`
+    const cli = writeCli(root, before)
+
+    await wireTui(newTree, cli, { treeFamily: "verylongowner--verylongrepo--", pluginKey: "keyLong" })
+
+    assert.deepEqual(readCliJson(cli).plugins, [newEntry], "the stale keyed entry must be pruned by key alone")
+    assert.ok(!fs.readFileSync(cli, "utf8").includes(oldEntry))
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true })
+  }
+})
+
+test("wireTui: a keyed entry with a DIFFERENT key is never pruned, even in the same family", async () => {
+  const root = tmpRoot()
+  try {
+    const otherTree = writeTreeAt(path.join(root, "github", "v2", "acme--widget--commitX--default-digestX", "tree"))
+    const newTree = writeTreeAt(path.join(root, "github", "v2", "acme--widget--commitB--default-digestB", "tree"))
+    const otherEntry = pathToFileURL(otherTree).href
+    const newEntry = pathToFileURL(newTree).href
+    const before = `{\n  "plugins": [\n    ${ENTRY_MARKER} [keyOther]\n    "${otherEntry}"\n  ]\n}\n`
+    const cli = writeCli(root, before)
+
+    await wireTui(newTree, cli, { treeFamily: "acme--widget--", pluginKey: "keyWidget" })
+
+    const after = fs.readFileSync(cli, "utf8")
+    assert.ok(after.includes(otherEntry), "a differently-keyed managed entry must never be claimed")
+    assert.ok(after.includes(`${ENTRY_MARKER} [keyOther]`), "the other key's marker must survive")
+    assert.deepEqual(readCliJson(cli).plugins, [otherEntry, newEntry])
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true })
+  }
+})
+
+test("wireTui: with neither pluginKey nor treeFamily (or empty strings) nothing is pruned", async () => {
+  const root = tmpRoot()
+  try {
+    const oldTree = writeTreeAt(path.join(root, "github", "v2", "acme--widget--commitA--default-digestA", "tree"))
+    const newTree = writeTreeAt(path.join(root, "github", "v2", "acme--widget--commitB--default-digestB", "tree"))
+    const oldEntry = pathToFileURL(oldTree).href
+    const newEntry = pathToFileURL(newTree).href
+    const seed = `{\n  "plugins": [\n    ${ENTRY_MARKER}\n    "${oldEntry}"\n  ]\n}\n`
+
+    const absent = writeCli(path.join(root, "absent"), seed)
+    await wireTui(newTree, absent)
+    assert.deepEqual(readCliJson(absent).plugins, [oldEntry, newEntry], "without identity opts the old entry stays")
+
+    const empty = writeCli(path.join(root, "empty"), seed)
+    await wireTui(newTree, empty, { treeFamily: "", pluginKey: "" })
+    assert.deepEqual(readCliJson(empty).plugins, [oldEntry, newEntry], 'empty "" identity must not degrade to includes("/")')
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true })
+  }
+})
+
+test("wireTui: writes the keyed managed marker, and created keys carry the key too (golden)", async () => {
+  const root = tmpRoot()
+  try {
+    const tree = writeTree(root)
+    const entry = pathToFileURL(tree).href
+    const key = "abc123def456abcd"
+
+    const existing = writeCli(path.join(root, "existing"), '{\n  "plugins": ["keep-me"]\n}\n')
+    await wireTui(tree, existing, { treeFamily: "acme--widget--", pluginKey: key })
+    assert.equal(
+      fs.readFileSync(existing, "utf8"),
+      `{\n  "plugins": ["keep-me",\n    ${ENTRY_MARKER} [${key}]\n    "${entry}"]\n}\n`,
+      "an appended entry must carry the keyed marker",
+    )
+
+    const created = writeCli(path.join(root, "created"), "{}\n")
+    await wireTui(tree, created, { treeFamily: "acme--widget--", pluginKey: key })
+    assert.equal(
+      fs.readFileSync(created, "utf8"),
+      `{\n  "plugins": [\n    ${CREATED_KEY_MARKER}\n    ${ENTRY_MARKER} [${key}]\n    "${entry}"\n  ]}\n`,
+      "an auto-created key must still carry the keyed entry marker",
+    )
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true })
+  }
+})
+
+test("unwireTui: a legacy bare-marker entry unwires both targeted and untargeted", async () => {
+  const root = tmpRoot()
+  try {
+    const treeA = writeTreeAt(path.join(root, "tree-a"))
+    const treeB = writeTreeAt(path.join(root, "tree-b"))
+    const entryA = pathToFileURL(treeA).href
+    const entryB = pathToFileURL(treeB).href
+    const cli = writeCli(
+      root,
+      `{\n  "plugins": ["keep-me",\n    ${ENTRY_MARKER}\n    "${entryA}",\n    ${ENTRY_MARKER}\n    "${entryB}"]\n}\n`,
+    )
+
+    assert.equal(await unwireTui(cli, entryA), true, "targeted unwire must remove the bare entry it names")
+    const targeted = fs.readFileSync(cli, "utf8")
+    assert.ok(!targeted.includes(entryA), "the named bare entry must be gone")
+    assert.ok(targeted.includes(entryB), "the other bare entry must survive a targeted unwire")
+
+    assert.equal(await unwireTui(cli), true, "untargeted unwire must remove the remaining bare entry")
+    assert.deepEqual(readCliJson(cli).plugins, ["keep-me"], "untargeted unwire removes every managed entry")
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true })
+  }
+})
+
+/* ---- idempotence: a repeat wire must never re-claim the entry it just wrote ---- */
+
+test("wireTui: a second wire with the same tree and key writes nothing (idempotent)", async () => {
+  const root = tmpRoot()
+  try {
+    const tree = writeTreeAt(path.join(root, "github", "v2", "acme--widget--commitB--default-fedcba9876543210", "tree"))
+    const cli = writeCli(root, '{\n  "plugins": ["keep-me"]\n}\n')
+    await wireTui(tree, cli, { treeFamily: "acme--widget--", pluginKey: "keyW" })
+    const once = fs.readFileSync(cli, "utf8")
+
+    await wireTui(tree, cli, { treeFamily: "acme--widget--", pluginKey: "keyW" })
+
+    assert.equal(fs.readFileSync(cli, "utf8"), once, "a repeat wire must not churn bytes (no prune+re-add)")
+    assert.equal(once.split(`[keyW]`).length - 1, 1, "the entry must not be duplicated")
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true })
+  }
+})
+
+test("wireTui: a second wire into the auto-created-key shape is byte-stable", async () => {
+  const root = tmpRoot()
+  try {
+    const tree = writeTreeAt(path.join(root, "github", "v2", "acme--widget--commitB--default-fedcba9876543210", "tree"))
+    const cli = writeCli(root, "{}\n")
+    await wireTui(tree, cli, { treeFamily: "acme--widget--", pluginKey: "keyW" })
+    const once = fs.readFileSync(cli, "utf8")
+    assert.ok(once.includes(CREATED_KEY_MARKER), "the auto-created-key shape must be in place")
+    assert.ok(once.includes(`[keyW]`), "the auto-created entry must carry the keyed marker")
+
+    await wireTui(tree, cli, { treeFamily: "acme--widget--", pluginKey: "keyW" })
+
+    assert.equal(fs.readFileSync(cli, "utf8"), once, "the auto-created-key shape must not churn on a repeat wire")
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true })
+  }
+})
+
+test("wireTui: a repeat wire keeps a managed entry at the array head in place", async () => {
+  const root = tmpRoot()
+  try {
+    const tree = writeTreeAt(path.join(root, "github", "v2", "acme--widget--commitB--default-fedcba9876543210", "tree"))
+    const entry = pathToFileURL(tree).href
+    const seeded = `{\n  "plugins": [\n    ${ENTRY_MARKER} [keyW]\n    "${entry}",\n    "user-after"\n  ]\n}\n`
+    const cli = writeCli(root, seeded)
+
+    await wireTui(tree, cli, { treeFamily: "acme--widget--", pluginKey: "keyW" })
+
+    assert.equal(fs.readFileSync(cli, "utf8"), seeded, "the head entry must keep its position with no churn")
+    assert.deepEqual(readCliJson(cli).plugins, [entry, "user-after"], "the head entry must remain first")
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true })
+  }
+})
+
+/* ---- keyless fallback: exact canonical shape, never a segment count ---- */
+
+test("wireTui: a widget@x--y (ref with --) never claims a widget--extra legacy entry", async () => {
+  const root = tmpRoot()
+  try {
+    // Both names split to 5 segments, so a bare segment-count rule would
+    // claim the unrelated plugin. The canonical-shape rule sees ours != 4 and
+    // skips the fallback entirely.
+    const newTree = writeTreeAt(path.join(root, "github", "v2", "acme--widget--x--y--default-fedcba9876543210", "tree"))
+    const otherTree = writeTreeAt(
+      path.join(root, "github", "v2", "acme--widget--extra--default--default-0011223344556677", "tree"),
+    )
+    const newEntry = pathToFileURL(newTree).href
+    const otherEntry = pathToFileURL(otherTree).href
+    const cli = writeCli(root, `{\n  "plugins": [\n    ${ENTRY_MARKER}\n    "${otherEntry}"\n  ]\n}\n`)
+
+    await wireTui(newTree, cli, { treeFamily: "acme--widget--", pluginKey: "keyW" })
+
+    const after = fs.readFileSync(cli, "utf8")
+    assert.ok(after.includes(otherEntry), "the different plugin's legacy entry must SURVIVE")
+    assert.ok(after.includes(newEntry), "the new entry must be added")
+    assert.deepEqual(readCliJson(cli).plugins, [otherEntry, newEntry])
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true })
+  }
+})
+
+test("wireTui: a 5-segment (non-canonical) legacy name is never claimed", async () => {
+  const root = tmpRoot()
+  try {
+    const newTree = writeTreeAt(path.join(root, "github", "v2", "acme--widget--commitB--default-fedcba9876543210", "tree"))
+    const legacyTree = writeTreeAt(path.join(root, "github", "v2", "acme--widget--x--y--default-0123456789abcdef", "tree"))
+    const newEntry = pathToFileURL(newTree).href
+    const legacyEntry = pathToFileURL(legacyTree).href
+    const cli = writeCli(root, `{\n  "plugins": [\n    ${ENTRY_MARKER}\n    "${legacyEntry}"\n  ]\n}\n`)
+
+    await wireTui(newTree, cli, { treeFamily: "acme--widget--", pluginKey: "keyW" })
+
+    const after = fs.readFileSync(cli, "utf8")
+    assert.ok(after.includes(legacyEntry), "a 5-segment legacy name must never be claimed")
+    assert.ok(after.includes(newEntry))
+    assert.deepEqual(readCliJson(cli).plugins, [legacyEntry, newEntry])
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true })
+  }
+})
+
+test("wireTui: degenerate treeFamily ('/' and '--') with no key prunes nothing", async () => {
+  const root = tmpRoot()
+  try {
+    const newTree = writeTreeAt(path.join(root, "github", "v2", "acme--widget--commitB--default-fedcba9876543210", "tree"))
+    const otherTree = writeTreeAt(path.join(root, "github", "v2", "other--repo--commitX--default-0011223344556677", "tree"))
+    const otherEntry = pathToFileURL(otherTree).href
+    const seed = `{\n  "plugins": [\n    ${ENTRY_MARKER}\n    "${otherEntry}"\n  ]\n}\n`
+
+    // "/" makes `value.includes("/" + treeFamily)` true for every file URL, so
+    // the shape gate is the only thing standing between it and a wrong claim.
+    const slash = writeCli(path.join(root, "slash"), seed)
+    await wireTui(newTree, slash, { treeFamily: "/" })
+    assert.ok(fs.readFileSync(slash, "utf8").includes(otherEntry), "'/' must not prune an unrelated managed entry")
+
+    const dashes = writeCli(path.join(root, "dashes"), seed)
+    await wireTui(newTree, dashes, { treeFamily: "--" })
+    assert.ok(fs.readFileSync(dashes, "utf8").includes(otherEntry), "'--' must not prune an unrelated managed entry")
   } finally {
     fs.rmSync(root, { recursive: true, force: true })
   }

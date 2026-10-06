@@ -23,6 +23,8 @@ import { scanStrandedV1, strandedWarning } from "./scan.js"
 import { PRESETS, checkPrerequisite, type Preset, type PrerequisiteCheck } from "./preset.js"
 import { checkFreshness, freshnessEnabled, pinnedNote } from "./freshness.js"
 import {
+  githubCacheRepoPrefix,
+  githubPluginKey,
   mountNote,
   parseGithubSpec,
   remoteTrustEnabled,
@@ -349,7 +351,10 @@ export default Plugin.define({
         const treeDir = path.join(gh.cacheDir, "tree")
         const cliJsonPath = options.cliJsonPath ?? path.join(os.homedir(), ".config", "opencode", "cli.json")
         try {
-          const wired = await wireTui(treeDir, cliJsonPath)
+          const wired = await wireTui(treeDir, cliJsonPath, {
+            treeFamily: githubCacheRepoPrefix(resolved.spec),
+            pluginKey: githubPluginKey(resolved.spec),
+          })
           reporter.record(
             `wire:${resolved.spec.owner}/${resolved.spec.repo}`,
             "mounted",

@@ -143,9 +143,19 @@ test("checkFreshness: malformed JSON is unknown", async () => {
 test("checkFreshness: an actual timeout is unknown, never a throw", async () => {
   // A fetch that never settles honors the abort signal the same way the real
   // fetch does, so a tiny timeout genuinely drives the timeout path.
+  //
+  // It must also hold the event loop open, exactly as a real in-flight request
+  // does: `AbortSignal.timeout`'s timer is unref'd, so a fake whose only way to
+  // settle is that timer leaves the loop with no handle at all. Node 22 drains
+  // it before the abort can fire and the runner cancels the test; the pending
+  // timer below is the in-flight handle the real socket would provide.
   const impl = (_url, init) =>
     new Promise((_resolve, reject) => {
-      init.signal.addEventListener("abort", () => reject(new Error("The operation was aborted.")))
+      const inFlight = setTimeout(() => reject(new Error("the request never returned")), 60_000)
+      init.signal.addEventListener("abort", () => {
+        clearTimeout(inFlight)
+        reject(new Error("The operation was aborted."))
+      })
     })
   const result = await checkFreshness(SPEC, { fetchImpl: impl, timeoutMs: 20 })
   assert.equal(result.status, "unknown")

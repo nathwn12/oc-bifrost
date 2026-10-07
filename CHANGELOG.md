@@ -1,5 +1,19 @@
 # Changelog
 
+## 1.4.5 (2026-10-07)
+
+### Changed
+
+- **A pushed release tag must name the version in `package.json`** (`.github/workflows/release.yml`). The publish job now compares the pushed tag (`GITHUB_REF_NAME`) against the version in `package.json` and fails before `npm publish` on a mismatch, so a stale tag can no longer publish from an unintended commit. A `workflow_dispatch` run carries no tag ref, so the guard is skipped there and the manifest version publishes.
+
+- **CI runs the check on both supported Node lines** (`.github/workflows/ci.yml`). The `check` job now uses a `node-version` matrix of `[22, 24]` instead of Node 24 alone, matching the `node >=22` floor the README advertises.
+
+- **The README setup steps carry the consumer verify command** (`README.md`). The copy-paste install block now ends with `opencode plugin check`, then `opencode plugin list` (shows what actually loaded), so a consumer confirms the mount instead of guessing.
+
+### Checks
+
+- `npm run check` green (289 pass, 1 skip, 0 fail).
+
 ## 1.4.4 (2026-10-06)
 
 ### Fixed

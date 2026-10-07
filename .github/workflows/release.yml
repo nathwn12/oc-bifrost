@@ -24,4 +24,14 @@ jobs:
           node-version: 24
           registry-url: https://registry.npmjs.org
       - run: npm ci
+      # A pushed tag must name the version in package.json, else the publish comes from an unintended commit.
+      # A workflow_dispatch run has no tag ref, so the check is skipped there; the manifest version publishes.
+      - name: Verify tag matches package.json version
+        if: startsWith(github.ref, 'refs/tags/')
+        run: |
+          expected="v$(node -p "require('./package.json').version")"
+          if [ "$expected" != "$GITHUB_REF_NAME" ]; then
+            echo "::error::tag $GITHUB_REF_NAME does not match package.json version $expected"
+            exit 1
+          fi
       - run: npm publish --access public

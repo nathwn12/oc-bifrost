@@ -1381,3 +1381,141 @@ test("wireTui: degenerate treeFamily ('/' and '--') with no key prunes nothing",
     fs.rmSync(root, { recursive: true, force: true })
   }
 })
+
+/* ---- server entry ---- */
+
+const SERVER_WRAPPER_MARKER = "// oc-bifrost: managed server entry"
+
+/** The managed root index.ts body this module writes for a tree-relative server target. */
+function serverWrapperFor(target) {
+  return `${SERVER_WRAPPER_MARKER}\nexport { default } from "./${target}";\n`
+}
+
+/** A tree with a TUI entry AND a server entry file at `serverRel`. */
+function writeServerTree(root, serverRel = "src/index.ts") {
+  const tree = writeTree(root)
+  const entry = path.join(tree, ...serverRel.split("/"))
+  fs.mkdirSync(path.dirname(entry), { recursive: true })
+  fs.writeFileSync(entry, 'export default { id: "widget.host" }\n')
+  return tree
+}
+
+test("wireTui: with opts.serverEntry writes a managed root index.ts re-exporting the declared entry", async () => {
+  const root = tmpRoot()
+  try {
+    const tree = writeServerTree(root)
+    const cli = writeCli(root, "{}")
+    const out = await wireTui(tree, cli, { serverEntry: "src/index.ts" })
+    assert.equal(out.kind, "wired")
+    assert.equal(out.serverEntry, path.join(tree, "index.ts"))
+    assert.equal(
+      fs.readFileSync(path.join(tree, "index.ts"), "utf8"),
+      serverWrapperFor("src/index.ts"),
+      "the server wrapper must re-export the ref's DECLARED entry file, not a hardcoded path",
+    )
+    assert.equal(out.wrapper, path.join(tree, "tui.tsx"), "the TUI wrapper behavior must be intact")
+    assert.ok(
+      readCliJson(cli).plugins.includes(pathToFileURL(tree).href),
+      "the tree root registration must be intact",
+    )
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true })
+  }
+})
+
+test("wireTui: the server-entry wrapper is idempotent", async () => {
+  const root = tmpRoot()
+  try {
+    const tree = writeServerTree(root)
+    const cli = writeCli(root, "{}")
+    await wireTui(tree, cli, { serverEntry: "src/index.ts" })
+    const again = await wireTui(tree, cli, { serverEntry: "src/index.ts" })
+    assert.equal(again.serverEntry, null, "a repeat mount must report no new server wrapper")
+    assert.equal(fs.readFileSync(path.join(tree, "index.ts"), "utf8"), serverWrapperFor("src/index.ts"))
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true })
+  }
+})
+
+test("wireTui: without opts.serverEntry no root index.ts is written", async () => {
+  const root = tmpRoot()
+  try {
+    const tree = writeServerTree(root)
+    const cli = writeCli(root, "{}")
+    const out = await wireTui(tree, cli)
+    assert.equal(out.serverEntry, null)
+    assert.equal(fs.existsSync(path.join(tree, "index.ts")), false, "existing TUI-only behavior must be intact")
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true })
+  }
+})
+
+test("wireTui: a user-authored root index.ts is never clobbered", async () => {
+  const root = tmpRoot()
+  try {
+    const tree = writeServerTree(root)
+    fs.writeFileSync(path.join(tree, "index.ts"), "export default { id: \"user.widget\" }\n")
+    const cli = writeCli(root, "{}")
+    const out = await wireTui(tree, cli, { serverEntry: "src/index.ts" })
+    assert.equal(out.serverEntry, null)
+    assert.equal(
+      fs.readFileSync(path.join(tree, "index.ts"), "utf8"),
+      "export default { id: \"user.widget\" }\n",
+      "a user server entry must survive byte-for-byte",
+    )
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true })
+  }
+})
+
+test("wireTui: a managed server wrapper is removed when a user entry appears beside it", async () => {
+  const root = tmpRoot()
+  try {
+    const tree = writeServerTree(root)
+    const cli = writeCli(root, "{}")
+    await wireTui(tree, cli, { serverEntry: "src/index.ts" })
+    assert.equal(fs.existsSync(path.join(tree, "index.ts")), true)
+    fs.writeFileSync(path.join(tree, "plugin.ts"), "export default { id: \"user.widget\" }\n")
+    const out = await wireTui(tree, cli, { serverEntry: "src/index.ts" })
+    assert.equal(out.kind, "wired", "the TUI half must keep working")
+    assert.equal(fs.existsSync(path.join(tree, "index.ts")), false, "our wrapper must never shadow a user entry")
+    assert.equal(
+      fs.readFileSync(path.join(tree, "plugin.ts"), "utf8"),
+      "export default { id: \"user.widget\" }\n",
+      "the user entry must survive byte-for-byte",
+    )
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true })
+  }
+})
+
+test("wireTui: a declared server entry naming no real file refuses loudly", async () => {
+  const root = tmpRoot()
+  try {
+    const tree = writeServerTree(root)
+    const cli = writeCli(root, "{}")
+    await assert.rejects(
+      () => wireTui(tree, cli, { serverEntry: "src/missing.ts" }),
+      /\[oc-bifrost\] refusing to create server-entry wrapper/,
+      "a broken declaration must refuse, never guess",
+    )
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true })
+  }
+})
+
+test("wireTui: the skip path writes no server wrapper", async () => {
+  const root = tmpRoot()
+  try {
+    const tree = writeTreeAt(path.join(root, "tree"), { tuiEntry: false })
+    const entry = path.join(tree, "src", "index.ts")
+    fs.mkdirSync(path.dirname(entry), { recursive: true })
+    fs.writeFileSync(entry, "export default {}\n")
+    const cli = writeCli(root, "{}")
+    const out = await wireTui(tree, cli, { serverEntry: "src/index.ts" })
+    assert.equal(out.kind, "skipped", "a tree with no TUI entry is never registered")
+    assert.equal(fs.existsSync(path.join(tree, "index.ts")), false, "an unregistered tree needs no server entry")
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true })
+  }
+})

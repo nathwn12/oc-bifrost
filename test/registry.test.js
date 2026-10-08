@@ -290,6 +290,63 @@ test("registryMountNote: pnpm: and bun: say plainly they are aliases installed t
   }
 })
 
+/* ---- shell-injection belt: hostile specifiers refuse loudly and never install ---- */
+
+/**
+ * Command injection on Windows (1.6.0): the range charset accepted `&`/`|`
+ * and the npm fallback spawned `npm.cmd` via `cmd.exe /c`, so `pkg@1&...` ran
+ * as a SECOND command. These cases model that failing state: each hostile
+ * bare must draw the NAMED belt refusal from the parser AND from the
+ * resolver, and the injected installer must NEVER be called. The resolver
+ * cases hand-build the spec object (as a caller that skipped the parser
+ * would), proving the belt sits before the install, not just in the parser.
+ */
+const HOSTILE_BARES = [
+  "pkg@1&whoami",
+  "pkg@1|whoami",
+  "pkg@1^&calc",
+  "pkg@1;id",
+  "pkg@1`whoami`",
+  "pkg@1$(id)",
+  "pkg@1\nwhoami",
+  "pkg@1\twhoami",
+]
+
+for (const hostile of HOSTILE_BARES) {
+  test(`registry belt: ${JSON.stringify(hostile)} draws the named refusal and never installs`, async () => {
+    assert.throws(() => parseRegistrySpecifier(hostile), /forbidden shell metacharacter/)
+    const root = tmpRoot()
+    try {
+      const fake = fakeInstall({ name: "pkg" })
+      const at = hostile.lastIndexOf("@")
+      const direct = { manager: "npm", bare: hostile, name: "pkg", range: hostile.slice(at + 1) }
+      await assert.rejects(
+        resolveRegistryPlugin(direct, { cacheRoot: root, install: fake.install }),
+        /forbidden shell metacharacter/,
+      )
+      assert.equal(fake.calls.length, 0, "the injected installer must never be called for a hostile spec")
+    } finally {
+      fs.rmSync(root, { recursive: true, force: true })
+    }
+  })
+}
+
+test("registry belt: a legitimate complex range still installs (no over-blocking)", async () => {
+  const spaced = parseRegistrySpecifier("pkg@>=1.0.0 <2.0.0")
+  assert.equal(spaced.range, ">=1.0.0 <2.0.0")
+  assert.equal(parseRegistrySpecifier("pkg@^1.2.3").range, "^1.2.3")
+  const root = tmpRoot()
+  try {
+    const fake = fakeInstall({ name: "pkg" })
+    const result = await resolveRegistryPlugin(spaced, { cacheRoot: root, install: fake.install })
+    assert.equal(result.fetched, true)
+    assert.deepEqual(fake.calls, [{ dir: result.cacheDir, bare: "pkg@>=1.0.0 <2.0.0" }])
+    assert.equal(result.meta.range, ">=1.0.0 <2.0.0")
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true })
+  }
+})
+
 /* ---- opt-in live integration: ONE real install of a tiny real package ---- */
 
 test(

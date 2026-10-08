@@ -104,8 +104,37 @@ function fail(message: string): never {
 const MANAGER_PREFIXES = ["npm:", "pnpm:", "bun:"] as const
 
 const PACKAGE_NAME_PATTERN = /^(@[A-Za-z0-9._~-]+\/[A-Za-z0-9._~-]+|[A-Za-z0-9._~-]+)$/
-/** A version, range, or tag: no whitespace, no URL/path separators or scheme chars. */
-const RANGE_PATTERN = /^[A-Za-z0-9._~^+<>=|&*x -]+$/
+/**
+ * A version, range, or tag. The charset is the npm range syntax that can
+ * legally appear (`^ ~ * > < =`, spaces, hyphens) plus alphanumerics - and
+ * NOTHING that is shell syntax: `&` and `|` are refused here (they used to be
+ * accepted, letting `pkg@1&...` reach a `cmd.exe /c` boundary as a second
+ * command). Anything outside this set fails the range check below.
+ */
+const RANGE_PATTERN = /^[A-Za-z0-9._~^+<>=*x -]+$/
+/**
+ * Belt over the whole bare spec: characters that can NEVER appear in a valid
+ * registry spec (`& | ; ` `` ` `` `$ " ' ( ) { } [ ] \` plus newline, CR, NUL,
+ * tab). Any one of them is a loud, named refusal - a refusal is a feature -
+ * raised BEFORE any installer runs, so a hostile spec can never reach a spawn
+ * even from a caller that skipped the parser. The shell removal in
+ * `defaultRegistryInstall` is what makes specs safe; this belt is the second
+ * layer, deliberately narrow so legal range syntax (`^ ~ * > < =` space) is
+ * never blocked.
+ */
+const FORBIDDEN_SPECIFIER_CHARS = /[&|;`$"\'(){}\[\]\\\n\r\t\0]/
+
+/** The named belt refusal for a bare spec carrying shell metacharacters. */
+function assertNoShellMetacharacters(bare: string, spec: string): void {
+  const hit = bare.match(FORBIDDEN_SPECIFIER_CHARS)
+  if (hit !== null) {
+    fail(
+      `refusing to install: invalid registry specifier "${safe(spec)}": ` +
+      `contains a forbidden shell metacharacter (${JSON.stringify(hit[0])}) ` +
+      `that can never appear in a valid registry spec; nothing was installed`,
+    )
+  }
+}
 
 /**
  * Parse a registry specifier: an optional `npm:`/`pnpm:`/`bun:` prefix plus a
@@ -125,8 +154,15 @@ export function parseRegistrySpecifier(spec: string): RegistrySpec {
   if (bare === "") {
     fail(`invalid registry specifier "${safe(spec)}": expected "name[@version|range|tag]" or "@scope/name[@version|range|tag]" after the prefix`)
   }
-  if (/[\s]/.test(bare) || bare.includes(":") || bare.includes("?") || bare.includes("#")) {
-    fail(`invalid registry specifier "${safe(spec)}": names carry no whitespace and no ":/?#" characters`)
+  // The belt runs before every other shape check so a hostile spec gets the
+  // NAMED shell-metacharacter refusal, never a generic shape message.
+  assertNoShellMetacharacters(bare, spec)
+  // A space is legal npm range syntax (`pkg@>=1.0.0 <2.0.0`), so only the
+  // URL/path separators and scheme chars are refused here; a stray space in
+  // the NAME still fails the package-name check below, and control whitespace
+  // (newline, CR, NUL, tab) already failed the belt above.
+  if (bare.includes(":") || bare.includes("?") || bare.includes("#")) {
+    fail(`invalid registry specifier "${safe(spec)}": names carry no ":/?#" characters`)
   }
   // Split name from range at the LAST "@" past index 0 (a leading "@" opens a scope).
   const at = bare.lastIndexOf("@")
@@ -298,10 +334,50 @@ function assertSafeRelativePath(relative: string): void {
 }
 
 /**
+ * Locate npm's own JS entry (`npm-cli.js`) without touching the `npm.cmd`
+ * shim: the shim is a `.cmd` file, so it can only run via a shell - the very
+ * boundary this installer must never cross. Probes the runtime's own layout
+ * first (`npm_execpath` when running under npm, then beside `process.execPath`
+ * in both the Windows and posix install layouts). Returns `undefined` when no
+ * entry is found, and the caller then skips the npm fallback loudly instead
+ * of reaching for a shell.
+ */
+function npmCliEntry(): string | undefined {
+  const candidates: string[] = []
+  if (process.env.npm_execpath) candidates.push(process.env.npm_execpath)
+  const exeDir = path.dirname(process.execPath)
+  candidates.push(
+    path.join(exeDir, "node_modules", "npm", "bin", "npm-cli.js"),
+    path.join(exeDir, "..", "lib", "node_modules", "npm", "bin", "npm-cli.js"),
+  )
+  for (const candidate of candidates) {
+    try {
+      if (fs.lstatSync(candidate).isFile()) return candidate
+    } catch {
+      // Not here - try the next candidate.
+    }
+  }
+  return undefined
+}
+
+/**
  * The default installer: spawn `bun add --exact <bare>` first (the host runs
  * on bun), falling back to `npm install --no-save --legacy-peer-deps <bare>`.
  * Returns the `installedBy` label for the mount note. Throws loudly when
  * neither manager is available or both fail.
+ *
+ * SECURITY - no user-controlled text may ever cross a shell boundary. Every
+ * attempt below is executed DIRECTLY (`spawnSync` with `shell: false` and an
+ * argv array), never through `cmd.exe /c` or any other shell: `bun` is a real
+ * `.exe` that needs no shell, and the npm fallback runs npm's own JS entry
+ * (`npm-cli.js`) through the current JS runtime (`process.execPath`) instead
+ * of the `npm.cmd` shim. The shim previously ran as
+ * `cmd.exe /d /c npm.cmd <args>`, so a specifier such as `pkg@1&...` was parsed
+ * by `cmd.exe` as a SECOND command - arbitrary command execution as the user.
+ * With direct exec the specifier travels as one argv element: metacharacters
+ * reach the manager as data, never as syntax. The forbidden-character belt in
+ * `parseRegistrySpecifier` / `resolveRegistryPlugin` is the second layer, not
+ * the first.
  */
 export function defaultRegistryInstall(dir: string, bare: string): string {
   fs.mkdirSync(dir, { recursive: true })
@@ -313,21 +389,40 @@ export function defaultRegistryInstall(dir: string, bare: string): string {
   }
   const attempts: Array<{ label: string; command: string; args: string[] }> = [
     { label: "bun (`bun add --exact`)", command: "bun", args: ["add", "--exact", bare] },
-    { label: "npm (`npm install --no-save --legacy-peer-deps`)", command: "npm", args: ["install", "--no-save", "--legacy-peer-deps", bare] },
   ]
+  // On Windows the `npm` name resolves only to the `npm.cmd` shim, which
+  // cannot run without a shell - so there the fallback exists ONLY as the
+  // shell-free `npm-cli.js` invocation. Elsewhere `npm` is directly
+  // executable (no shell involved), with `npm-cli.js` preferred when found.
+  const cli = npmCliEntry()
+  if (cli !== undefined) {
+    attempts.push({
+      label: "npm (`npm install --no-save --legacy-peer-deps` via npm-cli.js)",
+      command: process.execPath,
+      args: [cli, "install", "--no-save", "--legacy-peer-deps", bare],
+    })
+  } else if (process.platform !== "win32") {
+    attempts.push({ label: "npm (`npm install --no-save --legacy-peer-deps`)", command: "npm", args: ["install", "--no-save", "--legacy-peer-deps", bare] })
+  }
   const failures: string[] = []
+  if (attempts.length === 1 && process.platform === "win32") {
+    failures.push("npm fallback unavailable: no shell-free npm entry (npm-cli.js) found, and the npm.cmd shim is never run through a shell")
+  }
   for (const attempt of attempts) {
     let status: number | null = null
     try {
-      const result =
-        process.platform === "win32" && attempt.command === "npm"
-          ? spawnSync(process.env.ComSpec ?? "cmd.exe", ["/d", "/c", "npm.cmd", ...attempt.args], {
-              encoding: "utf8",
-              windowsHide: true,
-              cwd: dir,
-            })
-          : spawnSync(attempt.command, attempt.args, { encoding: "utf8", windowsHide: true, cwd: dir })
+      const result = spawnSync(attempt.command, attempt.args, {
+        encoding: "utf8",
+        windowsHide: true,
+        cwd: dir,
+        shell: false,
+      })
       status = result.status
+      const spawnError = (result as { error?: Error }).error
+      if (spawnError !== undefined) {
+        failures.push(`${attempt.label}: ${safe(spawnError.message, 200)}`)
+        continue
+      }
     } catch (error) {
       failures.push(`${attempt.label}: ${safe((error as Error).message, 200)}`)
       continue
@@ -347,6 +442,11 @@ export async function resolveRegistryPlugin(
   spec: RegistrySpec,
   opts: RegistryResolveOptions,
 ): Promise<RegistryResolveResult> {
+  // Belt BEFORE anything else - including the cache lookup and, crucially,
+  // the injected/real installer: a hostile bare handed to this function
+  // directly (skipping the parser) is refused here, so the installer is never
+  // called and no specifier text ever reaches a spawn.
+  assertNoShellMetacharacters(spec.bare, spec.bare)
   const cacheDir = path.join(opts.cacheRoot, registryCacheId(spec.bare))
   assertInsideRoot(opts.cacheRoot, cacheDir)
   validateCachePath(opts.cacheRoot, cacheDir)

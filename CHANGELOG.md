@@ -1,5 +1,41 @@
 # Changelog
 
+## 1.6.1 (2026-10-09)
+
+### Fixed
+
+- **Command injection on Windows in the registry-install path - SECURITY
+  (severity HIGH)** (`src/registry.ts`, `test/registry.test.js`). The 1.6.0
+  range charset accepted `&` and `|`, and the npm fallback spawned `npm.cmd`
+  via `cmd.exe /c`, so a specifier such as `pkg@1&...` was parsed by `cmd.exe`
+  as a SECOND command - arbitrary command execution as the user. Defence in
+  depth, both layers:
+  - **The shell boundary is gone.** `bun` still spawns directly (a real `.exe`,
+    no shell), and the npm fallback now runs npm's own JS entry (`npm-cli.js`)
+    through the current JS runtime (`process.execPath`) with `shell: false`
+    and an argv array - the `npm.cmd` shim (which can only run via a shell) is
+    never invoked. A specifier now travels as one argv element: metacharacters
+    reach the manager as data, never as syntax. On Windows with no shell-free
+    npm entry found, the fallback is skipped loudly instead of reaching for a
+    shell.
+  - **Impossible characters are refused as a belt.** A bare spec carrying any
+    of `& | ; \` `` ` `` `$ " ' ( ) { } [ ]` or control chars (newline, CR,
+    NUL, tab) draws the named `refusing to install ... forbidden shell
+    metacharacter` refusal - in the parser AND at the top of
+    `resolveRegistryPlugin` before any installer runs. Legal range syntax
+    (`^ ~ * > < =` space, e.g. `pkg@>=1.0.0 <2.0.0`, `pkg@^1.2.3`) still
+    resolves and installs: the shell removal is what makes it safe.
+- **Tests** (`test/registry.test.js`): eight hostile specifiers (`&`, `|`,
+  `^&`, `;`, backticks, `$(...)`, newline, tab) each asserting the NAMED refusal
+  from both the parser and the resolver with the injected installer NEVER
+  called, plus a positive case proving a legitimate complex range still
+  installs end to end.
+
+### Checks
+
+- `npm run check` green (331 pass, 2 skip, 0 fail).
+- `OC_BIFROST_REGISTRY_LIVE=1 node --test test/registry.test.js` green (28 pass, 0 fail).
+
 ## 1.6.0 (2026-10-09)
 
 ### Added

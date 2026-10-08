@@ -114,15 +114,15 @@ const PACKAGE_NAME_PATTERN = /^(@[A-Za-z0-9._~-]+\/[A-Za-z0-9._~-]+|[A-Za-z0-9._
 const RANGE_PATTERN = /^[A-Za-z0-9._~^+<>=*x -]+$/
 /**
  * Belt over the whole bare spec: characters that can NEVER appear in a valid
- * registry spec (`& | ; ` `` ` `` `$ " ' ( ) { } [ ] \` plus newline, CR, NUL,
- * tab). Any one of them is a loud, named refusal - a refusal is a feature -
+ * registry spec (`& | ; ` `` ` `` `$ " ' ( ) { } [ ] \` plus the FULL
+ * control-character range, `\x00`-`\x1f` and `\x7f`). Any one of them is a loud, named refusal - a refusal is a feature -
  * raised BEFORE any installer runs, so a hostile spec can never reach a spawn
  * even from a caller that skipped the parser. The shell removal in
  * `defaultRegistryInstall` is what makes specs safe; this belt is the second
  * layer, deliberately narrow so legal range syntax (`^ ~ * > < =` space) is
  * never blocked.
  */
-const FORBIDDEN_SPECIFIER_CHARS = /[&|;`$"\'(){}\[\]\\\n\r\t\0]/
+const FORBIDDEN_SPECIFIER_CHARS = /[&|;`$"\'(){}\[\]\\\x00-\x1f\x7f]/
 
 /** The named belt refusal for a bare spec carrying shell metacharacters. */
 function assertNoShellMetacharacters(bare: string, spec: string): void {
@@ -159,8 +159,8 @@ export function parseRegistrySpecifier(spec: string): RegistrySpec {
   assertNoShellMetacharacters(bare, spec)
   // A space is legal npm range syntax (`pkg@>=1.0.0 <2.0.0`), so only the
   // URL/path separators and scheme chars are refused here; a stray space in
-  // the NAME still fails the package-name check below, and control whitespace
-  // (newline, CR, NUL, tab) already failed the belt above.
+  // the NAME still fails the package-name check below, and control characters
+  // (`\x00`-`\x1f`, `\x7f`) already failed the belt above.
   if (bare.includes(":") || bare.includes("?") || bare.includes("#")) {
     fail(`invalid registry specifier "${safe(spec)}": names carry no ":/?#" characters`)
   }

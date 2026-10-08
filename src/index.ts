@@ -408,7 +408,9 @@ export default Plugin.define({
       // The cli.json path is CALLER-computed: the `cliJsonPath` option
       // overrides the default `~/.config/opencode/cli.json`, and wire-tui.ts
       // never guesses it. Whether a wrapper is needed is wire-tui's own
-      // condition - not duplicated here. A tree that ships no TUI entry is a
+      // condition - not duplicated here. The ref's declared server entry goes
+      // along so the host's directory load reads the plugin's own id (without
+      // it the registered tree lists with no id). A tree that ships no TUI entry is a
       // clean skip (an informational row, nothing written); a wire failure or
       // refusal is a loud row (never silent, never swallowed) and can never
       // abort the mount itself: the plugin already mounted.
@@ -427,11 +429,15 @@ export default Plugin.define({
           const wired = await wireTui(treeDir, cliJsonPath, {
             treeFamily: githubCacheRepoPrefix(resolved.spec),
             pluginKey: githubPluginKey(resolved.spec),
+            serverEntry: gh.meta.path,
           })
           reporter.record(
             `wire:${resolved.spec.owner}/${resolved.spec.repo}`,
             "mounted",
-            wired.kind === "skipped" ? wired.reason : `TUI entry ${wired.entry} wired into ${cliJsonPath}`,
+            wired.kind === "skipped"
+              ? wired.reason
+              : `TUI entry ${wired.entry} wired into ${cliJsonPath}` +
+                  (wired.serverEntry === null ? "" : `; server entry ${wired.serverEntry} re-exports ${gh.meta.path}`),
           )
         } catch (error) {
           reporter.warn(

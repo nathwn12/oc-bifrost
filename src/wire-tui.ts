@@ -82,6 +82,18 @@
  * The cli.json path is CALLER-PROVIDED: this module never guesses a config
  * directory and never writes a path that was not handed to it. Builtins
  * only; zero runtime dependencies.
+ *
+ * SERVER ENTRY (the `plugin list` fidelity half). A directory entry in
+ * cli.json is loaded by the host as a directory: without a loadable server
+ * entry at the tree root the host reports the entry with no id (`-`) even
+ * though the tree's manifest `exports["."]` names one (a registry install
+ * resolves `exports`, a directory load does not). When the caller hands
+ * `opts.serverEntry` (the ref's declared entry file, tree-relative), this
+ * module ensures a managed root `index.ts` re-exporting exactly that file -
+ * the same managed-marker ownership as the TUI wrapper under a distinct
+ * marker, never clobbering a user-authored root server entry, removed when a
+ * user entry appears beside it. Only on the wired path: a tree with no TUI
+ * entry is never registered, so it needs no server entry either.
  */
 import { readFile, rename, stat, unlink, writeFile } from "node:fs/promises"
 import { readFileSync, statSync } from "node:fs"
@@ -112,6 +124,51 @@ export function wrapperContent(target: string): string {
 /** Whether `content` is a wrapper this module wrote (marked, or the exact pre-derive artifact). */
 function isManagedWrapper(content: string): boolean {
   return content.startsWith(`${WRAPPER_MARKER}\n`) || content === LEGACY_WRAPPER_CONTENT
+}
+
+/**
+ * First line of a server-entry wrapper WE wrote. Deliberately distinct from
+ * `WRAPPER_MARKER` so the TUI heal path can never mistake one for the other
+ * (they live at different paths, but markers are the ownership proof).
+ */
+export const SERVER_WRAPPER_MARKER = "// oc-bifrost: managed server entry"
+
+/** The root `index.ts` re-export body for a tree-relative `target` (e.g. `src/index.ts`). */
+export function serverWrapperContent(target: string): string {
+  return `${SERVER_WRAPPER_MARKER}\n` + `export { default } from "./${target.replace(/^\.\//, "")}";\n`
+}
+
+/** Whether `content` is a server-entry wrapper this module wrote. */
+function isManagedServerWrapper(content: string): boolean {
+  return content.startsWith(`${SERVER_WRAPPER_MARKER}\n`)
+}
+
+/**
+ * Root filenames that count as a USER-authored server entry. `index.ts` is
+ * the file this module manages, so it is deliberately absent here: the
+ * managed marker is checked first, and any other name in this list present
+ * as a file means the tree already ships a loadable server entry of its own
+ * (never shadowed, never deleted).
+ */
+const USER_SERVER_ENTRIES = [
+  "index.tsx",
+  "index.js",
+  "index.mjs",
+  "index.cjs",
+  "plugin.ts",
+  "plugin.tsx",
+  "plugin.js",
+  "plugin.mjs",
+  "plugin.cjs",
+] as const
+
+/** True when `dir/<name>` exists as a regular file (a link counts as present - conservative). */
+function treeHasFile(dir: string, name: string): boolean {
+  try {
+    return statSync(join(dir, name)).isFile()
+  } catch {
+    return false
+  }
 }
 
 /** Inside an array WE created: marks the whole key as ours to remove. */
@@ -890,6 +947,92 @@ async function ensureWrapper(treeDir: string): Promise<WrapperStep> {
 }
 
 /**
+ * The server-entry step's outcome: `wrapped` (this call wrote the managed
+ * root `index.ts`), `present` (a user-authored server entry already exists -
+ * no write, ever), or `removed` (a wrapper this module wrote was taken back
+ * out because a user entry appeared beside it).
+ */
+type ServerEntryStep = { kind: "wrapped"; wrapper: string } | { kind: "present" } | { kind: "removed" }
+
+/**
+ * Ensure the tree root carries a loadable server entry for the host's
+ * directory load: a managed `index.ts` re-exporting the ref's declared
+ * `serverEntry` (tree-relative, e.g. `src/index.ts` from the resolve
+ * provenance). It is the server half of what the TUI wrapper is for the TUI
+ * half: without it the host lists the registered tree with no id (`-`);
+ * with it the host reads the entry's own id - the same module the bridge
+ * imports directly. A declared target that is not a real file inside the
+ * tree is a loud refusal (never a hardcoded guess); a user-authored entry is
+ * never written over, and a managed wrapper never shadows one.
+ */
+async function ensureServerEntry(treeDir: string, serverEntry: string): Promise<ServerEntryStep> {
+  const declared = serverEntry.replace(/^\.\//, "")
+  const target = !declared.includes("\\") ? realFileInsideTree(treeDir, declared) : null
+  if (target === null) {
+    throw new Error(
+      `[oc-bifrost] refusing to create server-entry wrapper ${join(treeDir, "index.ts")}: ` +
+        `the declared server entry "${declared}" is not a real file inside ${treeDir}`,
+    )
+  }
+  const wrapperPath = join(treeDir, "index.ts")
+  let existing: string | null = null
+  let wrapperIsFile = false
+  try {
+    wrapperIsFile = statSync(wrapperPath).isFile()
+    if (wrapperIsFile) existing = readFileSync(wrapperPath, "utf8")
+  } catch {
+    // absent, or unreadable: not ours to touch
+  }
+  const managed = existing !== null && isManagedServerWrapper(existing)
+  const userSibling = USER_SERVER_ENTRIES.some((name) => treeHasFile(treeDir, name))
+  if (wrapperIsFile && !managed) return { kind: "present" } // a user-authored index.ts
+  if (userSibling) {
+    // A user entry beside ours wins the probe (or might): never shadow it.
+    if (managed) {
+      try {
+        await unlink(wrapperPath)
+      } catch (e) {
+        throw new Error(
+          `[oc-bifrost] refusing to remove the stale managed server entry ${wrapperPath}: ${e instanceof Error ? e.message : String(e)}`,
+        )
+      }
+      return { kind: "removed" }
+    }
+    return { kind: "present" }
+  }
+  if (managed) {
+    const desired = serverWrapperContent(target)
+    if (existing === desired) return { kind: "present" } // idempotent: nothing to write
+    try {
+      await writeFile(wrapperPath, desired, "utf8")
+    } catch (e) {
+      throw new Error(
+        `[oc-bifrost] refusing to rewrite server-entry wrapper ${wrapperPath}: ${e instanceof Error ? e.message : String(e)}`,
+      )
+    }
+    return { kind: "wrapped", wrapper: wrapperPath }
+  }
+  if (wrapperIsFile) return { kind: "present" } // an unreadable index.ts: not ours, never touched
+  let blockedByDirectory = false
+  try {
+    blockedByDirectory = statSync(wrapperPath).isDirectory()
+  } catch {
+    blockedByDirectory = false // absent: nothing blocks creation
+  }
+  if (blockedByDirectory) {
+    throw new Error(`[oc-bifrost] refusing to create server-entry wrapper ${wrapperPath}: a directory occupies that path`)
+  }
+  try {
+    await writeFile(wrapperPath, serverWrapperContent(target), "utf8")
+  } catch (e) {
+    throw new Error(
+      `[oc-bifrost] refusing to create server-entry wrapper ${wrapperPath}: ${e instanceof Error ? e.message : String(e)}`,
+    )
+  }
+  return { kind: "wrapped", wrapper: wrapperPath }
+}
+
+/**
  * The outcome of one `wireTui` call:
  *   - `wired`   - the tree's `file://` URL is in cli.json; `wrapper` is the
  *                 wrapper this call wrote, or null when a loadable entry
@@ -901,7 +1044,7 @@ async function ensureWrapper(treeDir: string): Promise<WrapperStep> {
  *                 the caller: not a refusal, not a warning.
  */
 export type WireTuiOutcome =
-  | { kind: "wired"; wrapper: string | null; entry: string }
+  | { kind: "wired"; wrapper: string | null; entry: string; serverEntry: string | null }
   | { kind: "skipped"; reason: string }
 
 /**
@@ -1015,7 +1158,7 @@ function prunePreviousManaged(
 export async function wireTui(
   treeDir: string,
   cliJsonPath: string,
-  opts?: { treeFamily?: string; pluginKey?: string },
+  opts?: { treeFamily?: string; pluginKey?: string; serverEntry?: string },
 ): Promise<WireTuiOutcome> {
   const step = await ensureWrapper(treeDir)
   if (step.kind === "absent" || step.kind === "stale-removed") {
@@ -1033,6 +1176,14 @@ export async function wireTui(
           : `no TUI entry found in ${treeDir}; nothing to wire`,
     }
   }
+  // Server-entry half, wired path only: a tree that is about to be registered
+  // needs a loadable root server entry or the host lists it with no id.
+  // A refusal here is loud (via the caller) and never aborts the mount.
+  let serverWrapper: string | null = null
+  if (opts?.serverEntry !== undefined) {
+    const server = await ensureServerEntry(treeDir, opts.serverEntry)
+    if (server.kind === "wrapped") serverWrapper = server.wrapper
+  }
   const entry = pathToFileURL(treeDir).href
   await readMergeWriteStable(cliJsonPath, "refuse", (text) => {
     // A re-provision at a new resolved ref lands in a NEW cache dir, so the
@@ -1045,7 +1196,7 @@ export async function wireTui(
     if (merged !== null) return merged
     return pruned === text ? null : pruned
   })
-  return { kind: "wired", wrapper: step.kind === "wrapped" ? step.wrapper : null, entry }
+  return { kind: "wired", wrapper: step.kind === "wrapped" ? step.wrapper : null, entry, serverEntry: serverWrapper }
 }
 
 /**

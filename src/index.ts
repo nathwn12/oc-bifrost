@@ -18,7 +18,7 @@ import { createReporter, renderReport } from "./report.js"
 import { createReportSink } from "./sink.js"
 import { discover } from "./discover.js"
 import { buildV1Context } from "./context.js"
-import { registerV1Hooks } from "./hooks.js"
+import { hasKnownV1Hook, registerV1Hooks } from "./hooks.js"
 import { scanStrandedV1, strandedWarning } from "./scan.js"
 import { PRESETS, checkPrerequisite, type Preset, type PrerequisiteCheck } from "./preset.js"
 import { checkFreshness, freshnessEnabled, pinnedNote } from "./freshness.js"
@@ -284,7 +284,12 @@ export default Plugin.define({
       try {
         if (shape.kind === "v2") {
           if (typeof shape.definition.setup === "function") {
-            const cleanup = await shape.definition.setup(context)
+            // Per-plugin options are a defined V2 channel: the host mounts each
+            // plugin as `{ ...host, options: operation.options }`, defaulting to
+            // `{}` (packages/core/src/plugin/module.ts:149,
+            // packages/core/src/config/plugin/source.ts:115-117). Mirror it: the
+            // sub-plugin sees ITS entry options, never oc-bifrost's own.
+            const cleanup = await shape.definition.setup({ ...context, options: entry.options ?? {} })
             if (typeof cleanup === "function") cleanups.push(cleanup as () => void | Promise<void>)
             reporter.record(`v2:${shape.id}`, "mounted", "V2 setup invoked with the host context")
           } else {
@@ -297,6 +302,15 @@ export default Plugin.define({
         } else {
           const v1Context = buildV1Context(context, reporter)
           const hooks = await shape.factory(v1Context, entry.options)
+          // Discovery mounts ANY function export as a V1 factory by shape, so a
+          // helper-only module mounts as V1. The mounting is unchanged; the
+          // silence is removed: a mount exposing none of the known V1 hook keys
+          // warns loudly, naming the file.
+          if (!hasKnownV1Hook(hooks)) {
+            reporter.warn(
+              `"${entry.spec}" mounted as V1 but exposes none of the known V1 hook keys - likely a helper-only module picked by shape; nothing is bridged`,
+            )
+          }
           const registered = await registerV1Hooks(context, hooks, reporter)
           cleanups.push(...registered.cleanups)
           reporter.record(`v1:${shape.id}`, "mounted", shape.note ?? "V1 factory")

@@ -204,7 +204,7 @@ The unit of compatibility is the **V1 hook**, not the plugin — once a hook is 
 | `event` | 🟡 partial | `ctx.event.subscribe()` - V2 `session.execution.succeeded\|failed\|interrupted` synthesised to the V1 `session.idle` envelope; other names/payloads pass through |
 | `client.session.messages` | 🟡 partial | `ctx.session.context` — active context (post-compaction) only; the full transcript is HTTP-only |
 | `experimental.chat.system.transform` | 🟡 partial | `ctx.session.hook("context")` |
-| `experimental.chat.messages.transform` | 🟢 full | `ctx.session.hook("context")` — V1 `{info,parts}` envelope pre-fill + write-back |
+| `experimental.chat.messages.transform` | 🟢 full | `ctx.session.hook("context")` - V1 `{info,parts}` envelope pre-fill + shape-aware write-back (originals kept whole only when unchanged) |
 | `experimental.session.compacting` | 🟡 partial | `ctx.session.hook("compaction")` |
 | `client.session.children` | 🔴 refused | no plugin-scoped child listing in V2 (HTTP-only; the plugin context carries no server address) |
 | `client.tui.showToast` | 🔴 refused | `tui.toast.show` is a TUI-process event; no server-plugin toast surface |

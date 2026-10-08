@@ -129,6 +129,13 @@ export function buildV1Context(ctx: OCContext, reporter: Reporter): V1PluginInpu
   const directory = ctx.location?.directory ?? process.cwd()
   const shell: Shell = hostShell() ?? createShell()
 
+  // `serverUrl` below is a placeholder, not a real address: V2 hands a plugin
+  // no server address, so fetch URLs built from it silently target the wrong
+  // host. Stated once at load - a plugin that never touches it is unaffected.
+  reporter.warn(
+    `serverUrl is a placeholder ("http://127.0.0.1"): V2 provides no server address, so fetch URLs built from it target the wrong host`,
+  )
+
   const facade = {
     client: createClientFacade(ctx, reporter),
     project: ctx.location?.project,

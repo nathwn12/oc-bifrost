@@ -155,6 +155,84 @@ test("multi-plugin: options are not shared between entries", async () => {
   fs.rmSync(dir, { recursive: true, force: true })
 })
 
+/**
+ * A helper-only fixture: a single function export with a non-plugin name, so
+ * discovery mounts it as V1 by shape. The mounting itself is unchanged - the
+ * factory still runs - but the silence is removed with a loud row.
+ */
+function writeHelperOnlyFixture(dir, name) {
+  const file = path.join(dir, name)
+  fs.writeFileSync(file, [`export const formatTitle = async (input) => String(input).toUpperCase()`, ``].join("\n"))
+  return pathToFileURL(file).href
+}
+
+test("discover: a helper-only module still mounts as V1 but warns loudly naming the file", async () => {
+  const dir = tempDir()
+  const spec = writeHelperOnlyFixture(dir, "helpers.mjs")
+  const { ctx } = fakeContext()
+  ctx.options = { plugins: [{ spec }], verbose: false }
+
+  const warned = []
+  const savedWarn = console.warn
+  console.warn = (line) => warned.push(String(line))
+  try {
+    await bifrost.setup(ctx)
+  } finally {
+    console.warn = savedWarn
+  }
+
+  const joined = warned.join("\n")
+  assert.ok(
+    joined.includes("none of the known V1 hook keys") && joined.includes(spec),
+    `a helper-only V1 mount must warn naming the file, got:\n${joined}`,
+  )
+
+  fs.rmSync(dir, { recursive: true, force: true })
+})
+
+/**
+ * A native V2 fixture: default-exported `{ id, setup }`, which the mount loop
+ * invokes directly. The setup records the context options it received.
+ */
+function writeV2Fixture(dir, name, id) {
+  const file = path.join(dir, name)
+  fs.writeFileSync(
+    file,
+    [
+      `export default {`,
+      `  id: "${id}",`,
+      `  setup: async (ctx) => {`,
+      `    ;(globalThis.__bifrostV2Options ??= []).push(ctx.options)`,
+      `  },`,
+      `}`,
+    ].join("\n"),
+  )
+  return pathToFileURL(file).href
+}
+
+test("multi-plugin: V2 setup receives its own entry options, not the host context", async () => {
+  globalThis.__bifrostV2Options = []
+  const dir = tempDir()
+  const one = writeV2Fixture(dir, "one.mjs", "one")
+  const two = writeV2Fixture(dir, "two.mjs", "two")
+  const { ctx } = fakeContext()
+  ctx.options = { plugins: [{ spec: one, options: { tag: "V1" } }, { spec: two }], verbose: false }
+
+  const cleanup = await bifrost.setup(ctx)
+
+  // Mirrors the host (packages/core/src/plugin/module.ts:149): each plugin sees
+  // its own operation options, defaulting to {}. The host context - carrying
+  // oc-bifrost's own `plugins` list - must never leak through.
+  assert.deepEqual(globalThis.__bifrostV2Options, [{ tag: "V1" }, {}])
+  assert.ok(
+    !("plugins" in globalThis.__bifrostV2Options[0]),
+    "bifrost host options must not leak into the sub-plugin",
+  )
+
+  await cleanup()
+  fs.rmSync(dir, { recursive: true, force: true })
+})
+
 /* ---- options/env plumbing: wireTui (opt-in TUI wiring on mounted github: snapshots) ---- */
 
 /**
@@ -434,10 +512,13 @@ test("wireTui: a tree with no TUI entry is a clean skip row and cli.json is neve
       )
       // The plugin's OWN load-time compat refusals (`client.tui.*`,
       // `client.session.children` - context.ts states them at load, before any
-      // wiring runs) are not about the wire step. Everything the wiring could
-      // say here would name the tree, the wrapper, or cli.json: none of that
-      // may appear, because a skip opens cli.json and writes nothing.
-      const wiringWarnings = warned.filter((line) => !/client\.(tui|session)/i.test(line))
+      // wiring runs) are not about the wire step, and neither is the `serverUrl`
+      // placeholder notice every V1 mount states at load. Everything the wiring
+      // could say here would name the tree, the wrapper, or cli.json: none of
+      // that may appear, because a skip opens cli.json and writes nothing.
+      const wiringWarnings = warned.filter(
+        (line) => !/client\.(tui|session)/i.test(line) && !/serverUrl is a placeholder/i.test(line),
+      )
       assert.deepEqual(
         wiringWarnings,
         [],

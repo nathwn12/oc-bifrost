@@ -32,7 +32,7 @@ export const COMPAT_MATRIX: readonly MatrixRow[] = [
     hook: "tool.execute.after",
     level: "partial",
     v2: 'ctx.tool.hook("execute.after")',
-    test: "bridge: tool.execute.after writes result.output and metadata",
+    test: "bridge: tool.execute.after writes error.message and metadata on failure",
   },
   {
     hook: "shell.env",
@@ -56,7 +56,7 @@ export const COMPAT_MATRIX: readonly MatrixRow[] = [
     hook: "chat.message",
     level: "partial",
     v2: 'ctx.session.hook("prompt")',
-    test: "bridge: chat.message registers a prompt hook",
+    test: "bridge: chat.message writes prompt files, agents and skills",
   },
   {
     hook: "permission.ask",
@@ -110,7 +110,7 @@ export const COMPAT_MATRIX: readonly MatrixRow[] = [
     hook: "experimental.chat.system.transform",
     level: "partial",
     v2: 'ctx.session.hook("context")',
-    test: "bridge: string[] system transform round-trips",
+    test: "bridge: system transform preserves untouched parts",
   },
   {
     hook: "experimental.chat.messages.transform",

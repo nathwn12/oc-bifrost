@@ -26,6 +26,49 @@ function v1ToolName(tool: unknown): unknown {
   return tool === "shell" ? "bash" : tool
 }
 
+/**
+ * The reverse of `v1ToolName`: a V1-era tool name reassigned by a hook maps
+ * back onto the V2 name before landing on the event (`bash` -> `shell`;
+ * anything else passes through unchanged).
+ */
+function v2ToolName(tool: string): string {
+  return tool === "bash" ? "shell" : tool
+}
+
+/**
+ * Byte-identity for one pre-filled V1 message envelope. The snapshot is taken
+ * BEFORE the V1 hook runs: pre-fill shares each parts array by reference, so
+ * an in-place part edit must read as divergence. A value that refuses to
+ * serialise degrades instead of pairing -- the snapshot and post-hook
+ * sentinels deliberately differ, so an unserialisable envelope never claims
+ * to be identical to anything.
+ */
+function messageFingerprint(message: unknown, original: boolean): string {
+  try {
+    return JSON.stringify(message) ?? (original ? "original" : "output")
+  } catch {
+    return original ? "__bifrost-unserializable-original__" : "__bifrost-unserializable-output__"
+  }
+}
+
+/**
+ * The degraded write-back for one V1 message envelope: built from the V1
+ * hook's OWN info/parts, never from a positionally paired original, so a hook
+ * that removes, adds, or reorders messages cannot hand a survivor the WRONG
+ * original's id or V2-side fields. Event-level pre-fill (agent, model) stays
+ * on the event and never lands on the message.
+ */
+function toPlainMessage(message: unknown): Record<string, unknown> {
+  const envelope = (message ?? {}) as { info?: Record<string, unknown>; parts?: unknown }
+  const info = (envelope.info ?? {}) as Record<string, unknown>
+  const plain: Record<string, unknown> = {}
+  plain.role = typeof info.role === "string" ? info.role : "user"
+  if (info.id !== undefined) plain.id = info.id
+  // NOTE: non-text V1-native parts (type:"tool"/"file"/...) land verbatim in content and are not valid V2 ContentParts.
+  plain.content = Array.isArray(envelope.parts) ? envelope.parts : []
+  return plain
+}
+
 const TERMINAL_EXECUTION_EVENTS = new Set([
   "session.execution.succeeded",
   "session.execution.failed",
@@ -63,6 +106,44 @@ export interface RegisterResult {
   cleanups: Array<() => void | Promise<void>>
 }
 
+/**
+ * Every V1 hook key oc-bifrost recognises - bridged, approximated, or refused
+ * out loud. Discovery mounts ANY function export as a V1 factory by shape, so
+ * a helper-only module mounts as V1; when its returned hooks expose none of
+ * these keys the mount warns loudly (the mounting itself is unchanged).
+ */
+export const KNOWN_V1_HOOK_KEYS = [
+  "tool.execute.before",
+  "tool.execute.after",
+  "shell.env",
+  "chat.params",
+  "chat.headers",
+  "chat.message",
+  "permission.ask",
+  "experimental.chat.messages.transform",
+  "experimental.chat.system.transform",
+  "experimental.session.compacting",
+  "tool.definition",
+  "tool",
+  "event",
+  "dispose",
+  "config",
+  "auth",
+  "provider",
+  "command.execute.before",
+  "experimental.provider.small_model",
+  "experimental.compaction.autocontinue",
+  "experimental.text.complete",
+] as const
+
+export function hasKnownV1Hook(hooks: unknown): boolean {
+  if (!hooks || typeof hooks !== "object") return false
+  const table = hooks as Record<string, unknown>
+  // `tool` is a definition map, not a function - non-empty means a real bridge.
+  if (table.tool && typeof table.tool === "object" && Object.keys(table.tool).length > 0) return true
+  return KNOWN_V1_HOOK_KEYS.some((key) => key !== "tool" && typeof table[key] === "function")
+}
+
 export async function registerV1Hooks(
   ctx: OCContext,
   hooks: V1Hooks,
@@ -75,12 +156,34 @@ export async function registerV1Hooks(
   const before = asHandler(table["tool.execute.before"])
   if (before) {
     await ctx.tool.hook("execute.before", async (event) => {
-      const input = { tool: v1ToolName(event.tool), sessionID: event.sessionID, callID: String(event.id) }
+      // V2 reads BOTH `event.input` and `event.tool` back after the hook
+      // (`packages/core/src/tool.ts:271-280`: `input.definitions?.get(event.tool)`,
+      // then `requested?.name ?? event.tool` selects the executed tool), so a V1
+      // reassignment of either must land back on the event. `input.tool` arrives
+      // under its V1-era name (`shell` -> `bash`); the reassignment is compared
+      // against the PRESENTED name so an untouched hook writes nothing back
+      // (stamping the presented `bash` over a V2 `shell` would corrupt it), and
+      // a real reassignment is mapped back (`bash` -> `shell`) before landing.
+      const presented = v1ToolName(event.tool)
+      const input = { tool: presented, sessionID: event.sessionID, callID: String(event.id) }
       const output = { args: event.input }
       await before(input, output)
       if (output.args !== event.input) event.input = output.args
+      if (typeof input.tool === "string") {
+        if (input.tool !== presented) event.tool = v2ToolName(input.tool)
+      } else if (input.tool !== presented) {
+        // Fail loud: a non-string reassignment has no V2 destination, so it
+        // is dropped - and the drop is named instead of silent.
+        let detail: string
+        try {
+          detail = JSON.stringify(input.tool) ?? String(input.tool)
+        } catch {
+          detail = typeof input.tool
+        }
+        reporter.warn(`tool.execute.before ignored a non-string input.tool reassignment (${detail}); event.tool unchanged`)
+      }
     })
-    reporter.record("tool.execute.before", "full", "mutable event.input write-back")
+    reporter.record("tool.execute.before", "full", "mutable event.input + event.tool write-back")
   }
 
   /* ---------------- tool.execute.after ---------------- */
@@ -102,9 +205,16 @@ export async function registerV1Hooks(
       if (event.status === "completed" && event.result) {
         if (output.output) event.result.output = output.output
         if (output.metadata !== undefined) event.result.metadata = output.metadata
+      } else if (event.status === "error" && event.error) {
+        // The error branch carries a `Tool.Error` (`{ message, metadata? }` -
+        // packages/schema/src/tool.ts:61-65), so the V1 string output lands on
+        // `error.message` and metadata onto `error.metadata`. `title` has no
+        // destination on either branch - the same stated loss as before.
+        if (output.output) event.error.message = output.output
+        if (output.metadata !== undefined) event.error.metadata = output.metadata
       }
     })
-    reporter.record("tool.execute.after", "partial", "result.output/metadata write-back; title ignored")
+    reporter.record("tool.execute.after", "partial", "completed: result.output/metadata, error: error.message/metadata; title ignored on both branches")
   }
 
   /* ---------------- shell.env ---------------- */
@@ -158,18 +268,29 @@ export async function registerV1Hooks(
     await ctx.session.hook("prompt", async (event) => {
       // V2 reads `event.prompt` back as the message text (`session/prompt.ts:40-52`),
       // so the V1 write must land on `event.prompt.text`. The V1 hook is handed the
-      // V1-era shapes pre-filled from the V2 prompt text — `output.message` (whole
-      // message) and `output.parts` (a leading text part) — and its rewrite is read
+      // V1-era shapes pre-filled from the V2 prompt text - `output.message` (whole
+      // message) and `output.parts` (a leading text part) - and its rewrite is read
       // back: a changed `message.content`, or text parts that changed from the
       // pre-fill, replace the prompt text. Idempotent: a no-op hook changes nothing.
-      const prompt = (event as { prompt?: { text?: string } }).prompt
+      //
+      // Attachments ride the same round-trip: V2 carries `files`/`agents`/`skills`
+      // on the prompt (`packages/core/src/session/prompt.ts:40-52`), pre-filled
+      // onto the synthetic message by reference. A reassignment lands back on the
+      // prompt; an untouched reference (including in-place mutation, which already
+      // shares the array) writes nothing. Non-text content parts still have no V2
+      // destination and are ignored.
+      const prompt = (event as { prompt?: { text?: string; files?: unknown; agents?: unknown; skills?: unknown } }).prompt
       const original = (prompt && typeof prompt.text === "string" ? prompt.text : "") as string
+      const originalFiles = prompt?.files
+      const originalAgents = prompt?.agents
+      const originalSkills = prompt?.skills
       const output = {
-        message: { role: "user", content: original },
+        message: { role: "user", content: original, files: originalFiles, agents: originalAgents, skills: originalSkills },
         parts: [{ type: "text", text: original }] as unknown[],
       }
       await chatMessage({ sessionID: event.sessionID, messageID: event.messageID }, output)
-      const content = (output.message as { content?: unknown } | undefined)?.content
+      const message = output.message as { content?: unknown; files?: unknown; agents?: unknown; skills?: unknown }
+      const content = message?.content
       const textParts = Array.isArray(output.parts)
         ? (output.parts as Array<{ type?: string; text?: unknown }>)
             .filter((part) => part?.type === "text" && typeof part.text === "string")
@@ -182,9 +303,14 @@ export async function registerV1Hooks(
           : partsJoin !== original && partsJoin.length > 0
             ? partsJoin
             : original
-      if (prompt && rewritten !== original) prompt.text = rewritten
+      if (prompt) {
+        if (rewritten !== original) prompt.text = rewritten
+        if (message.files !== originalFiles) prompt.files = message.files
+        if (message.agents !== originalAgents) prompt.agents = message.agents
+        if (message.skills !== originalSkills) prompt.skills = message.skills
+      }
     })
-    reporter.record("chat.message", "partial", "prompt hook; pre-filled V1 message/parts -> event.prompt.text write-back")
+    reporter.record("chat.message", "partial", "prompt hook; pre-filled V1 message/parts -> event.prompt.text/files/agents/skills write-back; non-text content parts ignored")
   }
 
   /* ---------------- permission.ask ---------------- */
@@ -239,35 +365,92 @@ export async function registerV1Hooks(
           return { info, parts: Array.isArray(content) ? (content as unknown[]) : [] }
         }),
       }
+      const fingerprints = output.messages.map((message) => messageFingerprint(message, true))
       await messagesTransform({ sessionID: event.sessionID }, output)
       if (Array.isArray(output.messages)) {
-        event.messages = output.messages.map((m, i) => {
-          const original = v2Messages[i] ?? {}
-          return { ...original, content: Array.isArray(m.parts) ? m.parts : original.content }
-        })
+        // Shape-aware write-back, mirroring the system.transform block below:
+        // entries pair with originals ONLY when the pairing is provable. The
+        // same count with every entry byte-identical keeps each original
+        // whole; a longer array whose leading run the hook left byte-identical
+        // (an append) keeps that run; anything else degrades to plain messages
+        // built from the hook's own envelope. Same-index pairing on a shorter
+        // or reordered shape would hand a surviving message the WRONG
+        // original's object as soon as two messages share a text.
+        const originals = v2Messages.slice()
+        if (output.messages.length === originals.length) {
+          event.messages = output.messages.map((message, index) =>
+            messageFingerprint(message, false) === fingerprints[index]
+              ? originals[index]
+              : toPlainMessage(message),
+          )
+        } else if (output.messages.length > originals.length) {
+          const prints = output.messages.map((message) => messageFingerprint(message, false))
+          const diverged = prints.findIndex(
+            (print, index) => index >= fingerprints.length || print !== fingerprints[index],
+          )
+          const stop = diverged === -1 ? output.messages.length : diverged
+          event.messages = output.messages.map((message, index) =>
+            index < stop && index < originals.length ? originals[index] : toPlainMessage(message),
+          )
+        } else {
+          event.messages = output.messages.map((message) => toPlainMessage(message))
+        }
       }
     })
-    reporter.record("experimental.chat.messages.transform", "full", "V2 Message[] -> V1 {info,parts}[] pre-fill; parts write-back to content")
+    reporter.record("experimental.chat.messages.transform", "full", "V2 Message[] -> V1 {info,parts}[] pre-fill; originals kept whole only when the shape is unchanged, otherwise plain messages from the hook's own envelope")
   }
 
   /* ---------------- experimental.chat.system.transform ---------------- */
   const systemTransform = asHandler(table["experimental.chat.system.transform"])
   if (systemTransform) {
     await ctx.session.hook("context", async (event) => {
-      const parts = (event.system ?? []) as Array<{ type?: string; text?: string }>
-      const output = { system: parts.map((part) => part.text ?? "") }
+      // V1 sees `string[]`; V2 carries `SystemPart[]`
+      // (`packages/ai/src/schema/messages.ts:21-27` - text parts with optional
+      // cache/metadata). The write-back pairs entries with originals ONLY when
+      // the pairing is provable: the same count (same positions), or a longer
+      // array whose leading run the hook left byte-identical (an append). A
+      // shorter array, or any divergence past the leading run, degrades to
+      // plain `{ type: "text", text }` parts - same-index pairing there would
+      // hand a surviving string the WRONG original's enrichment as soon as two
+      // entries share a text.
+      const system = (event.system ?? []) as unknown[]
+      const originals = system.slice()
+      const originalTexts = system.map((part) =>
+        typeof part === "string" ? part : ((part as { text?: unknown } | null | undefined)?.text as string | undefined) ?? "",
+      )
+      const output = { system: originalTexts }
       await systemTransform({ sessionID: event.sessionID, model: event.model }, output)
       if (Array.isArray(output.system)) {
-        event.system = output.system.map((text) => ({ type: "text", text }))
+        if (output.system.length === originals.length) {
+          event.system = output.system.map((text, index) =>
+            text === originalTexts[index] ? originals[index] : { type: "text", text },
+          )
+        } else if (output.system.length > originals.length) {
+          const diverged = output.system.findIndex(
+            (text, index) => index >= originalTexts.length || text !== originalTexts[index],
+          )
+          const stop = diverged === -1 ? output.system.length : diverged
+          event.system = output.system.map((text, index) =>
+            index < stop && index < originals.length ? originals[index] : { type: "text", text },
+          )
+        } else {
+          event.system = output.system.map((text) => ({ type: "text", text }))
+        }
       }
     })
-    reporter.record("experimental.chat.system.transform", "partial", "string[] <-> SystemPart[] conversion")
+    reporter.record("experimental.chat.system.transform", "partial", "string[] <-> SystemPart[] round-trip; originals kept only when the shape is unchanged, otherwise plain text parts")
   }
 
   /* ---------------- experimental.session.compacting ---------------- */
   const compacting = asHandler(table["experimental.session.compacting"])
   if (compacting) {
     await ctx.session.hook("compaction", async (event) => {
+      // V1 offers `output.prompt` as a full replacement of the compaction prompt,
+      // but the V2 compaction event carries NO prompt field: SessionCompaction is
+      // SessionContext (system/messages/options/tools) plus an optional pre-set
+      // `result` (packages/plugin/src/promise/session.ts:45-48). There is no
+      // destination to write to, so the replacement is accepted and ignored -
+      // inventing one would be a lie. Only `context` (appended to system) lands.
       const output = { context: [] as string[], prompt: undefined as string | undefined }
       await compacting({ sessionID: event.sessionID }, output)
       if (Array.isArray(output.context)) {
@@ -275,7 +458,7 @@ export async function registerV1Hooks(
         for (const text of output.context) system.push({ type: "text", text })
       }
     })
-    reporter.record("experimental.session.compacting", "partial", "context appended to compaction system; prompt replacement ignored")
+    reporter.record("experimental.session.compacting", "partial", "context appended to compaction system; V1 prompt replacement has no V2 destination (SessionCompaction carries no prompt field)")
   }
 
   /* ---------------- tool.definition ---------------- */

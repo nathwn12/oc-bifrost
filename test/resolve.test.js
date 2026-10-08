@@ -42,12 +42,15 @@ test("resolveSpec: file:// passes through unchanged (regression)", () => {
   assert.deepEqual(resolveSpec(url, DIR), { kind: "module", url })
 })
 
-test("resolveSpec: bare package names are refused honestly (npm support not built yet)", () => {
-  // Changed in the github:-by-source slice: a bare name used to pass through
-  // to `import()`, which failed deep in the loader. Refusing with the accepted
-  // forms is the feature; see src/index.ts resolveSpec.
-  assert.throws(() => resolveSpec("some-plugin-package", DIR), /not yet supported/)
-  assert.throws(() => resolveSpec("some-plugin-package", DIR), /accepted forms are: preset:, github:/)
+test("resolveSpec: bare package names resolve to the registry kind (installed from the npm registry)", () => {
+  // Changed in the registry slice: a bare name used to pass through to
+  // `import()`, which failed deep in the loader, then was refused honestly.
+  // Now it installs from the registry into a bifrost-owned cache; see
+  // src/registry.ts and test/registry.test.js.
+  assert.deepEqual(resolveSpec("some-plugin-package", DIR), {
+    kind: "registry",
+    spec: { manager: "npm", bare: "some-plugin-package", name: "some-plugin-package" },
+  })
 })
 
 /* ---- new behaviour ---- */

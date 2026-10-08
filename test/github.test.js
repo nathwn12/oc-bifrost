@@ -233,14 +233,20 @@ test("resolveSpec: a github: spec parses to the github kind", () => {
   })
 })
 
-test("resolveSpec: npm: is refused with the accepted-forms message (not built yet)", () => {
-  assert.throws(() => resolveSpec("npm:left-pad", "some/dir"), /not yet supported/)
-  assert.throws(() => resolveSpec("npm:left-pad", "some/dir"), /accepted forms are: preset:, github:, ~\/path, \.\/path/)
+test("resolveSpec: npm:/pnpm:/bun: resolve to the registry kind (installed from the npm registry)", () => {
+  assert.deepEqual(resolveSpec("npm:left-pad", "some/dir"), {
+    kind: "registry",
+    spec: { manager: "npm", bare: "left-pad", name: "left-pad" },
+  })
+  assert.equal(resolveSpec("pnpm:left-pad", "some/dir").spec.manager, "pnpm")
+  assert.equal(resolveSpec("bun:left-pad", "some/dir").spec.manager, "bun")
 })
 
-test("resolveSpec: a bare package name is refused with the accepted-forms message", () => {
-  assert.throws(() => resolveSpec("some-plugin-package", "some/dir"), /not yet supported/)
-  assert.throws(() => resolveSpec("some-plugin-package", "some/dir"), /accepted forms are: preset:, github:/)
+test("resolveSpec: a bare package name resolves to the registry kind", () => {
+  assert.deepEqual(resolveSpec("some-plugin-package", "some/dir"), {
+    kind: "registry",
+    spec: { manager: "npm", bare: "some-plugin-package", name: "some-plugin-package" },
+  })
 })
 
 /* ---- cache hardening: id + inside-root guard ---- */

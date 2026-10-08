@@ -6,8 +6,12 @@ A compatibility bridge that runs OpenCode **V1-era plugin hooks** on the **V2** 
 
 One OpenCode V2 plugin (`src/index.ts`) that imports plugin modules of any era and mounts them:
 
-- V1 factory / V1 module → `src/hooks.ts` translates V1 hook keys to V2 registration calls.
-- V2 definition `{ id, setup }` → mounted with the host context.
+- V1 factory / V1 module -> `src/hooks.ts` translates V1 hook keys to V2 registration calls.
+- V2 definition `{ id, setup }` -> mounted with the host context.
+- Sourcing is `github:` (by source, `src/github.ts`), a registry package
+  (installed from the npm registry into a bifrost-owned cache, `src/registry.ts`),
+  a local path, or a bundled `preset:`. `pnpm:`/`bun:` are aliases that install
+  through the same spawned manager - the mount note says so plainly.
 
 ## The contract
 

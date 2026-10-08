@@ -32,6 +32,15 @@ import {
   type GithubResolveResult,
   type GithubSpec,
 } from "./github.js"
+import {
+  isBareRegistrySpecifier,
+  parseRegistrySpecifier,
+  registryCacheRoot,
+  registryMountNote,
+  resolveRegistryPlugin,
+  type RegistryResolveResult,
+  type RegistrySpec,
+} from "./registry.js"
 import { wireTui } from "./wire-tui.js"
 import type { BifrostOptions, OCContext, PluginEntry } from "./types.js"
 
@@ -58,6 +67,14 @@ export function githubCacheRoot(
   return path.join(cacheHome, "opencode", "oc-bifrost", "github")
 }
 
+/** The shared OpenCode cache root for installed registry plugins. */
+export function registryCacheRootFor(
+  homeDirectory = os.homedir(),
+  env: NodeJS.ProcessEnv = process.env,
+): string {
+  return registryCacheRoot(homeDirectory, env)
+}
+
 /**
  * Whether opt-in TUI wiring is enabled. An explicit option wins; otherwise
  * `OC_BIFROST_WIRE_TUI` opts in with exactly `"1"` or `"true"`
@@ -78,12 +95,15 @@ export type ResolvedSpec =
   | { kind: "module"; url: string }
   | { kind: "preset"; id: string }
   | { kind: "github"; spec: GithubSpec }
+  | { kind: "registry"; spec: RegistrySpec }
 
 /** The honest refusal for a form this slice does not build. */
 export function unsupportedSpecifierMessage(spec: string): string {
   return (
-    `[oc-bifrost] unsupported specifier "${spec}": npm and bare package names are not yet supported; ` +
-    `accepted forms are: preset:, github:, ~/path, ./path (or an absolute path)`
+    `[oc-bifrost] unsupported specifier "${spec}": accepted forms are: preset:, github:, ` +
+    `a registry package (a bare name such as "oc-todo", "oc-todo@0.4.0", "@scope/pkg@^1.0.0", ` +
+    `"pkg@latest", or the same behind an "npm:", "pnpm:", or "bun:" prefix), ~/path, ./path ` +
+    `(or an absolute path), file://`
   )
 }
 
@@ -107,9 +127,16 @@ export function unsupportedSpecifierMessage(spec: string): string {
  *   - `./`, `../`, absolute -> a `file://` URL resolved against `directory`
  *                (unchanged from 0.1.0 — the regression surface).
  *   - `file://` -> passed through as a bare module specifier.
- *   - anything else — including `npm:` and bare package names — is refused
- *                with the accepted-forms message. npm support is not built
- *                yet; refusing honestly beats guessing.
+ *   - a bare registry name (`oc-todo`, `oc-todo@0.4.0`, `@scope/pkg@^1.0.0`,
+ *                `pkg@latest`) or the same behind an `npm:`/`pnpm:`/`bun:`
+ *                prefix -> installed from the npm registry into a
+ *                bifrost-owned cache directory and mounted from there. The
+ *                prefix is stripped and the remainder is treated as the bare
+ *                spec; `pnpm:`/`bun:` are aliases that install through the
+ *                same spawned manager (never a real pnpm/bun install), and
+ *                the mount note says so plainly. See `registry.ts`.
+ *   - anything else is refused with the accepted-forms message (see
+ *                `unsupportedSpecifierMessage`); refusing honestly beats guessing.
  */
 export function resolveSpec(spec: string, directory: string): ResolvedSpec {
   if (spec === "~") {
@@ -135,6 +162,16 @@ export function resolveSpec(spec: string, directory: string): ResolvedSpec {
   const isRelative = spec.startsWith("./") || spec.startsWith("../") || path.isAbsolute(spec)
   if (isRelative) return { kind: "module", url: pathToFileURL(path.resolve(directory, spec)).href }
   if (spec.startsWith("file://")) return { kind: "module", url: spec }
+  // Registry specifiers last: `github:` / `preset:` / paths above are matched
+  // byte-for-byte as before, so only what used to be refused reaches here. A
+  // prefixed form parses (malformed forms throw loudly); a bare name resolves
+  // only when it parses as a registry spec - anything else is refused.
+  if (spec.startsWith("npm:") || spec.startsWith("pnpm:") || spec.startsWith("bun:")) {
+    return { kind: "registry", spec: parseRegistrySpecifier(spec) }
+  }
+  if (!spec.includes(":") && isBareRegistrySpecifier(spec)) {
+    return { kind: "registry", spec: parseRegistrySpecifier(spec) }
+  }
   throw new Error(unsupportedSpecifierMessage(spec))
 }
 
@@ -213,6 +250,7 @@ export default Plugin.define({
       let presetNote: string | undefined
       let bundle: Preset | undefined
       let githubNote: string | undefined
+      let registryNote: string | undefined
       // Hoisted so the post-mount wiring step can read the resolve result.
       let gh: GithubResolveResult | undefined
       if (resolved.kind === "preset") {
@@ -252,6 +290,25 @@ export default Plugin.define({
         // load. Load-time warnings (e.g. an ignored pre-snapshot cache) ride
         // in the same note, so nothing is silent.
         githubNote = [mountNote(gh.meta, gh.fetched), ...(gh.warnings ?? []), ...(gh.provision ?? [])].join("; ")
+      } else if (resolved.kind === "registry") {
+        // Cache-first WITHOUT a consent gate: the package comes from the
+        // public npm registry (not an arbitrary repo), and naming it in
+        // `options.plugins` IS the opt-in. A warm, verified cache loads with
+        // zero spawns. The cache is user-level, mirroring the github layout.
+        // The mount note always names the installed version, the spawner, and
+        // - for `pnpm:`/`bun:` - the alias honesty line. Classification below
+        // is unchanged: V1 bridges, V2 runs natively.
+        try {
+          const reg: RegistryResolveResult = await resolveRegistryPlugin(resolved.spec, {
+            cacheRoot: registryCacheRootFor(),
+          })
+          specifier = reg.url
+          registryNote = registryMountNote(reg)
+        } catch (error) {
+          reporter.warn((error as Error).message)
+          if (options.strict) throw error
+          continue
+        }
       } else {
         specifier = resolved.url
       }
@@ -319,6 +376,8 @@ export default Plugin.define({
           reporter.record(`preset:${resolved.id}`, "mounted", presetNote)
         } else if (resolved.kind === "github" && githubNote) {
           reporter.record(`github:${resolved.spec.owner}/${resolved.spec.repo}`, "mounted", githubNote)
+        } else if (resolved.kind === "registry" && registryNote) {
+          reporter.record(`registry:${resolved.spec.bare}`, "mounted", registryNote)
         }
         mounted = true
       } catch (error) {

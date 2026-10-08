@@ -1,5 +1,35 @@
 # Changelog
 
+## 1.6.0 (2026-10-09)
+
+### Added
+
+- **Registry specifiers - `options.plugins` mounts from the npm registry**
+  (`src/registry.ts`, `src/index.ts`): bare names (`oc-todo`, `oc-todo@0.4.0`,
+  `@scope/pkg@^1.0.0`, `pkg@latest`) and `npm:` / `pnpm:` / `bun:` prefixed
+  forms (the prefix is stripped and the remainder treated as the bare spec).
+  bifrost installs the package itself - the host installer drops `npm:` alias
+  specs and ships no pnpm/bun installer - by spawning `bun add --exact` first
+  (the host runs on bun) with an `npm install --no-save --legacy-peer-deps`
+  fallback, into a bifrost-owned cache dir mirroring the github convention
+  (`<cacheRoot>/registry/<safe-id>/`). Zero runtime dependencies (node
+  builtins + a spawned manager, never imported). Cache-first; the installed
+  entry (resolved via its own `package.json` `exports`/`main`) must exist
+  before import or the mount fails loudly. It mounts whatever it resolves to:
+  V1 bridges, V2 runs its native `setup`, classified by the existing
+  `src/discover.ts`. **Alias honesty:** `pnpm:`/`bun:` install through the same
+  spawned manager, and the mount note says so plainly (never implying a real
+  pnpm/bun install happened).
+- **Tests** (`test/registry.test.js`): bare `name`, `name@version`,
+  `name@range`, `name@tag`, `@scope/name@version`, each of `npm:`/`pnpm:`/`bun:`,
+  the alias-honesty note, and malformed-spec refusals - all hermetic behind an
+  injectable fake installer - plus ONE opt-in live case
+  (`OC_BIFROST_REGISTRY_LIVE=1`) that really installs `escape-string-regexp@5.0.0`.
+
+### Checks
+
+- `npm run check` green (322 pass, 2 skip, 0 fail).
+
 ## 1.5.0 (2026-10-09)
 
 ### Changed

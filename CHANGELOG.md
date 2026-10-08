@@ -1,5 +1,29 @@
 # Changelog
 
+## 1.6.2 (2026-10-09)
+
+### Fixed
+
+- **Registry belt covers the full control-character range - defence in depth
+  (severity LOW)** (`src/registry.ts`, `test/registry.test.js`). The
+  `FORBIDDEN_SPECIFIER_CHARS` belt covered newline, CR, NUL and tab but not
+  the rest of the control range, so a direct `resolveRegistryPlugin` call with
+  a hand-built `spec.bare` containing e.g. BEL, VT, ESC or DEL missed the
+  named belt refusal and failed later with a generic message. The belt is now
+  `/[&|;`$"\'(){}\[\]\\\x00-\x1f\x7f]/`, so every control character draws the
+  named `refusing to install ... forbidden shell metacharacter` refusal on
+  both the parser path and the direct-resolver path. Legal range syntax is
+  untouched (`^ ~ * > < =` space, `pkg@latest`, `pkg@1.2.x`, `pkg@~1.2.0`).
+- **Tests** (`test/registry.test.js`): four new hostile specifiers (BEL, VT,
+  ESC, DEL) each asserting the NAMED refusal from both the parser and the
+  resolver with the injected installer NEVER called, plus `pkg@latest`,
+  `pkg@1.2.x` and `pkg@~1.2.0` positive range cases.
+
+### Checks
+
+- `npm run check` green (335 pass, 2 skip, 0 fail).
+- `OC_BIFROST_REGISTRY_LIVE=1 node --test test/registry.test.js` green (32 pass, 0 fail).
+
 ## 1.6.1 (2026-10-09)
 
 ### Fixed

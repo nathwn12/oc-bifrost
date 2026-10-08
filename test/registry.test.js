@@ -300,6 +300,8 @@ test("registryMountNote: pnpm: and bun: say plainly they are aliases installed t
  * resolver, and the injected installer must NEVER be called. The resolver
  * cases hand-build the spec object (as a caller that skipped the parser
  * would), proving the belt sits before the install, not just in the parser.
+ * The belt covers the FULL control-character range (`\x00`-`\x1f`, `\x7f`):
+ * BEL, VT, ESC and DEL below model the previously omitted slice.
  */
 const HOSTILE_BARES = [
   "pkg@1&whoami",
@@ -310,6 +312,10 @@ const HOSTILE_BARES = [
   "pkg@1$(id)",
   "pkg@1\nwhoami",
   "pkg@1\twhoami",
+  "pkg@1\x07whoami",
+  "pkg@1\vwhoami",
+  "pkg@1\x1bwhoami",
+  "pkg@1\x7fwhoami",
 ]
 
 for (const hostile of HOSTILE_BARES) {
@@ -335,6 +341,9 @@ test("registry belt: a legitimate complex range still installs (no over-blocking
   const spaced = parseRegistrySpecifier("pkg@>=1.0.0 <2.0.0")
   assert.equal(spaced.range, ">=1.0.0 <2.0.0")
   assert.equal(parseRegistrySpecifier("pkg@^1.2.3").range, "^1.2.3")
+  assert.equal(parseRegistrySpecifier("pkg@latest").range, "latest")
+  assert.equal(parseRegistrySpecifier("pkg@1.2.x").range, "1.2.x")
+  assert.equal(parseRegistrySpecifier("pkg@~1.2.0").range, "~1.2.0")
   const root = tmpRoot()
   try {
     const fake = fakeInstall({ name: "pkg" })

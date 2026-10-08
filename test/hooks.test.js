@@ -110,6 +110,61 @@ test("bridge: a V2 shell execution presents input.tool as the V1 bash name and t
   assert.equal(event.input.command, "rtk git status")
 })
 
+test("bridge: tool.execute.before writes a reassigned input.tool back onto the V2 event", async () => {
+  // V2 reads `event.tool` back after the hook to select the executed tool
+  // (`packages/core/src/tool.ts:271-280`: `input.definitions?.get(event.tool)`,
+  // then `requested?.name ?? event.tool`), so a V1 `input.tool` reassignment
+  // must land on the event - otherwise it is silently lost.
+  const { ctx, fire } = fakeContext()
+  await registerV1Hooks(
+    ctx,
+    {
+      "tool.execute.before": async (input, _output) => {
+        input.tool = "read"
+      },
+    },
+    createReporter("reassign", {}),
+  )
+  const event = { tool: "shell", sessionID: "s", agent: "a", messageID: "m", id: "c", input: { command: "ls" } }
+  await fire("tool:execute.before", event)
+  assert.equal(event.tool, "read")
+})
+
+test("bridge: tool.execute.before maps a reassigned bash back onto the V2 shell tool", async () => {
+  const { ctx, fire } = fakeContext()
+  await registerV1Hooks(
+    ctx,
+    {
+      "tool.execute.before": async (input, _output) => {
+        input.tool = "bash"
+      },
+    },
+    createReporter("reassign-alias", {}),
+  )
+  const event = { tool: "read", sessionID: "s", agent: "a", messageID: "m", id: "c", input: {} }
+  await fire("tool:execute.before", event)
+  assert.equal(event.tool, "shell")
+})
+
+test("bridge: tool.execute.before leaves event.tool alone when the V1 hook does not reassign it", async () => {
+  // The V1 hook sees the aliased `bash` for a V2 `shell` execution; stamping
+  // the presented name back unconditionally would corrupt `shell` into `bash`.
+  const { ctx, fire } = fakeContext()
+  await registerV1Hooks(
+    ctx,
+    {
+      "tool.execute.before": async (_input, output) => {
+        output.args.command = "kept"
+      },
+    },
+    createReporter("alias-safe", {}),
+  )
+  const event = { tool: "shell", sessionID: "s", agent: "a", messageID: "m", id: "c", input: { command: "ls" } }
+  await fire("tool:execute.before", event)
+  assert.equal(event.tool, "shell")
+  assert.equal(event.input.command, "kept")
+})
+
 test("bridge: a throwing execute.before propagates (V1 reject semantics)", async () => {
   const { ctx, fire } = fakeContext()
   await registerV1Hooks(
@@ -140,6 +195,36 @@ test("bridge: tool.execute.after writes result.output and metadata", async () =>
   await fire("tool:execute.after", event)
   assert.equal(event.result.output, "rewritten")
   assert.deepEqual(event.result.metadata, { seen: true })
+})
+
+test("bridge: tool.execute.after writes error.message and metadata on failure", async () => {
+  // The V2 error branch carries a Tool.Error ({ message, metadata? } -
+  // packages/schema/src/tool.ts:61-65), so the V1 string output lands on
+  // error.message. Title has no destination on either branch.
+  const { ctx, fire } = fakeContext()
+  await registerV1Hooks(
+    ctx,
+    {
+      "tool.execute.after": async (_input, output) => {
+        output.title = "ignored everywhere"
+        output.output = "failure detail"
+        output.metadata = { seen: true }
+      },
+    },
+    createReporter("after", {}),
+  )
+  const event = { tool: "shell", id: "c", input: {}, status: "error", error: { message: "original" } }
+  await fire("tool:execute.after", event)
+  assert.equal(event.error.message, "failure detail")
+  assert.deepEqual(event.error.metadata, { seen: true })
+  assert.equal(event.title, undefined, "V1 title has no error-shape destination")
+
+  // A no-op hook leaves the error untouched.
+  const idleCtx = fakeContext()
+  await registerV1Hooks(idleCtx.ctx, { "tool.execute.after": async () => {} }, createReporter("after", {}))
+  const idle = { tool: "shell", id: "c", input: {}, status: "error", error: { message: "keep" } }
+  await idleCtx.fire("tool:execute.after", idle)
+  assert.deepEqual(idle.error, { message: "keep" })
 })
 
 test("bridge: shell.env merges into event.env", async () => {
@@ -318,6 +403,70 @@ test("bridge: chat.message ignores a non-text write-back", async () => {
   const event = { sessionID: "s", messageID: "m", prompt: { text: "original" } }
   await fire("session:prompt", event)
   assert.equal(event.prompt.text, "original", "only text parts are joined; nothing else is written")
+})
+
+test("bridge: chat.message writes prompt files, agents and skills", async () => {
+  // V2 carries attachments on the prompt event (packages/core/src/session/
+  // prompt.ts:40-52). The V1 hook sees them pre-filled on the synthetic message;
+  // a reassignment lands back on the prompt, a no-op writes nothing.
+  const { ctx, fire } = fakeContext()
+  const seen = []
+  await registerV1Hooks(
+    ctx,
+    {
+      "chat.message": async (input, output) => {
+        seen.push(input)
+        assert.deepEqual(
+          output.message.files,
+          [{ uri: "file:///old.ts" }],
+          "the V2 attachments arrive pre-filled on the message",
+        )
+        output.message.content = "rewritten"
+        output.message.files = [{ uri: "file:///a.ts", name: "a.ts" }]
+        output.message.agents = [{ id: "agent-1" }]
+        output.message.skills = [{ id: "skill-1" }]
+      },
+    },
+    createReporter("message", {}),
+  )
+  const event = {
+    sessionID: "s",
+    messageID: "m",
+    prompt: { text: "original", files: [{ uri: "file:///old.ts" }], agents: [], skills: [] },
+  }
+  await fire("session:prompt", event)
+  assert.equal(seen.length, 1)
+  assert.equal(event.prompt.text, "rewritten")
+  assert.deepEqual(event.prompt.files, [{ uri: "file:///a.ts", name: "a.ts" }])
+  assert.deepEqual(event.prompt.agents, [{ id: "agent-1" }])
+  assert.deepEqual(event.prompt.skills, [{ id: "skill-1" }])
+
+  // An in-place push shares the pre-filled array, so it lands with no write-back.
+  const pushCtx = fakeContext()
+  await registerV1Hooks(
+    pushCtx.ctx,
+    {
+      "chat.message": async (input, output) => {
+        output.message.files.push({ uri: "file:///b.ts" })
+      },
+    },
+    createReporter("message", {}),
+  )
+  const pushed = { sessionID: "s", messageID: "m", prompt: { text: "t", files: [] } }
+  await pushCtx.fire("session:prompt", pushed)
+  assert.deepEqual(pushed.prompt.files, [{ uri: "file:///b.ts" }])
+
+  // A no-op hook is idempotent across every prompt field.
+  const idleCtx = fakeContext()
+  await registerV1Hooks(idleCtx.ctx, { "chat.message": async () => {} }, createReporter("message", {}))
+  const idle = {
+    sessionID: "s",
+    messageID: "m",
+    prompt: { text: "keep", files: [{ uri: "file:///k.ts" }], agents: [{ id: "a" }], skills: [{ id: "sk" }] },
+  }
+  const snapshot = structuredClone(idle.prompt)
+  await idleCtx.fire("session:prompt", idle)
+  assert.deepEqual(idle.prompt, snapshot)
 })
 
 test("bridge: tool.definition applies a snapshot through a transform", async () => {
@@ -507,6 +656,98 @@ test("bridge: string[] system transform round-trips", async () => {
   ])
 })
 
+test("bridge: system transform preserves untouched parts", async () => {
+  // V2 parts may carry enrichment (cache/metadata) or a non-text shape; the
+  // index-aligned write-back keeps whatever the V1 hook did not touch whole.
+  const { ctx, fire } = fakeContext()
+  const seen = []
+  const enriched = { type: "text", text: "alpha", cache: { key: "k" }, metadata: { source: "t" } }
+  const foreign = { type: "other", text: "beta", custom: true }
+  await registerV1Hooks(
+    ctx,
+    {
+      "experimental.chat.system.transform": async (input, output) => {
+        seen.push({ input, system: [...output.system] })
+        output.system = [output.system[0], "BETA!", "appended"]
+      },
+    },
+    createReporter("system", {}),
+  )
+  const event = { sessionID: "s", model: { id: "m" }, system: [enriched, foreign] }
+  await fire("session:context", event)
+  assert.deepEqual(seen[0].system, ["alpha", "beta"], "V1 still sees the system as a string[]")
+  assert.ok(event.system[0] === enriched, "an untouched part keeps its whole original object (cache/metadata survive)")
+  assert.deepEqual(event.system[1], { type: "text", text: "BETA!" }, "an edited entry collapses to a plain text part")
+  assert.deepEqual(event.system[2], { type: "text", text: "appended" })
+})
+
+test("bridge: system transform removal degrades to plain parts instead of misattributing originals", async () => {
+  // Duplicate strings prove the pairing: two identical texts carry different
+  // enrichment, so same-index mapping would hand the survivor the REMOVED
+  // part's object. A shorter shape is never index-paired.
+  const { ctx, fire } = fakeContext()
+  const enriched = { type: "text", text: "dup", cache: { key: "k" }, metadata: { source: "t" } }
+  await registerV1Hooks(
+    ctx,
+    {
+      "experimental.chat.system.transform": async (_input, output) => {
+        output.system = output.system.slice(1)
+      },
+    },
+    createReporter("system", {}),
+  )
+  const event = { sessionID: "s", model: { id: "m" }, system: [enriched, { type: "text", text: "dup" }] }
+  await fire("session:context", event)
+  assert.equal(event.system.length, 1)
+  assert.ok(event.system[0] !== enriched, "the surviving string must not inherit the removed part's enrichment")
+  assert.deepEqual(event.system[0], { type: "text", text: "dup" })
+})
+
+test("bridge: system transform append preserves existing originals", async () => {
+  const { ctx, fire } = fakeContext()
+  const enriched = { type: "text", text: "alpha", cache: { key: "k" }, metadata: { source: "t" } }
+  const second = { type: "text", text: "beta" }
+  await registerV1Hooks(
+    ctx,
+    {
+      "experimental.chat.system.transform": async (_input, output) => {
+        output.system.push("appended")
+      },
+    },
+    createReporter("system", {}),
+  )
+  const event = { sessionID: "s", model: { id: "m" }, system: [enriched, second] }
+  await fire("session:context", event)
+  assert.ok(event.system[0] === enriched, "an untouched leading part keeps its whole original object")
+  assert.ok(event.system[1] === second, "an untouched leading part keeps its whole original object")
+  assert.deepEqual(event.system[2], { type: "text", text: "appended" })
+})
+
+test("bridge: tool.execute.before warns on a non-string input.tool reassignment", async () => {
+  const { ctx, fire } = fakeContext()
+  const warnings = []
+  const reporter = createReporter("tool-guard", {})
+  const warn = reporter.warn.bind(reporter)
+  reporter.warn = (message) => {
+    warnings.push(message)
+    warn(message)
+  }
+  await registerV1Hooks(
+    ctx,
+    {
+      "tool.execute.before": async (input, _output) => {
+        input.tool = 42
+      },
+    },
+    reporter,
+  )
+  const event = { tool: "shell", sessionID: "s", agent: "a", messageID: "m", id: "c", input: { command: "ls" } }
+  await fire("tool:execute.before", event)
+  assert.equal(event.tool, "shell", "a non-string reassignment must not land on the event")
+  assert.equal(warnings.length, 1)
+  assert.match(warnings[0], /non-string input\.tool/)
+})
+
 test("bridge: messages transform round-trips the V1 {info,parts} envelope", async () => {
   // Mirrors BOTH real V1 plugins at once — model-announcer unshifts a synthetic
   // part onto the last USER message's parts; agent-identity pairs messages.transform
@@ -601,6 +842,102 @@ test("bridge: messages transform round-trips the V1 {info,parts} envelope", asyn
   )
 })
 
+test("bridge: messages transform removal degrades to plain messages instead of misattributing originals", async () => {
+  // Duplicate texts prove the pairing: two messages with identical parts carry
+  // different V2-side fields, so same-index mapping would hand the survivor the
+  // REMOVED message's object. A shorter shape is never index-paired.
+  const { ctx, fire } = fakeContext()
+  const enriched = {
+    role: "user",
+    id: "m1",
+    content: [{ type: "text", text: "dup" }],
+    custom: { flag: true },
+  }
+  await registerV1Hooks(
+    ctx,
+    {
+      "experimental.chat.messages.transform": async (_input, output) => {
+        output.messages = output.messages.slice(1)
+      },
+    },
+    createReporter("messages", {}),
+  )
+  const event = {
+    sessionID: "s",
+    agent: "build",
+    model: { id: "m", providerID: "p" },
+    messages: [enriched, { role: "user", id: "m2", content: [{ type: "text", text: "dup" }] }],
+    system: [],
+  }
+  await fire("session:context", event)
+  assert.equal(event.messages.length, 1)
+  assert.ok(event.messages[0] !== enriched, "the surviving message must not inherit the removed message's object")
+  assert.deepEqual(event.messages[0], {
+    role: "user",
+    id: "m2",
+    content: [{ type: "text", text: "dup" }],
+  })
+})
+
+test("bridge: messages transform degraded write-back always carries a string role and no sessionID", async () => {
+  // V2 Message REQUIRES role (packages/ai/src/schema/messages.ts:238) and has
+  // no sessionID field (messages.ts:236-243): a hook-supplied envelope without
+  // a role degrades to role "user" (never the positionally-paired original's
+  // role), and info.sessionID never lands on the message.
+  const { ctx, fire } = fakeContext()
+  await registerV1Hooks(
+    ctx,
+    {
+      "experimental.chat.messages.transform": async (_input, output) => {
+        output.messages = [
+          { info: {}, parts: [{ type: "text", text: "role-less" }] },
+          { info: { sessionID: "s" }, parts: [{ type: "text", text: "session-scoped" }] },
+        ]
+      },
+    },
+    createReporter("messages", {}),
+  )
+  const event = {
+    sessionID: "s",
+    agent: "build",
+    model: { id: "m", providerID: "p" },
+    messages: [
+      { role: "assistant", id: "m1", content: [{ type: "text", text: "hi" }] },
+      { role: "user", id: "m2", content: [{ type: "text", text: "hello" }] },
+    ],
+    system: [],
+  }
+  await fire("session:context", event)
+  assert.equal(event.messages.length, 2)
+  for (const message of event.messages) {
+    assert.equal(typeof message.role, "string", "every degraded message must carry a string role")
+    assert.equal("sessionID" in message, false, "sessionID is not a V2 Message field and must not land on the message")
+  }
+  assert.deepEqual(event.messages[0], { role: "user", content: [{ type: "text", text: "role-less" }] })
+  assert.deepEqual(event.messages[1], { role: "user", content: [{ type: "text", text: "session-scoped" }] })
+})
+
+test("bridge: messages transform append preserves existing originals", async () => {
+  const { ctx, fire } = fakeContext()
+  const first = { role: "user", id: "m1", content: [{ type: "text", text: "hello" }] }
+  const second = { role: "assistant", id: "m2", content: [{ type: "text", text: "hi" }] }
+  await registerV1Hooks(
+    ctx,
+    {
+      "experimental.chat.messages.transform": async (_input, output) => {
+        output.messages.push({ info: { role: "user" }, parts: [{ type: "text", text: "appended" }] })
+      },
+    },
+    createReporter("messages", {}),
+  )
+  const event = { sessionID: "s", model: { id: "m" }, messages: [first, second], system: [] }
+  await fire("session:context", event)
+  assert.equal(event.messages.length, 3)
+  assert.ok(event.messages[0] === first, "an untouched leading message keeps its whole original object")
+  assert.ok(event.messages[1] === second, "an untouched leading message keeps its whole original object")
+  assert.deepEqual(event.messages[2], { role: "user", content: [{ type: "text", text: "appended" }] })
+})
+
 test("bridge: compacting appends context to the compaction system", async () => {
   const { ctx, fire } = fakeContext()
   const seen = []
@@ -623,6 +960,11 @@ test("bridge: compacting appends context to the compaction system", async () => 
     { type: "text", text: "base" },
     { type: "text", text: "remember the plan" },
   ])
+  assert.equal(
+    "prompt" in event,
+    false,
+    "the V2 compaction event carries no prompt field (SessionCompaction is system/messages/options/tools + result), so the V1 replacement must not leak onto the event",
+  )
 })
 
 test("bridge: auth is refused out loud", async () => {

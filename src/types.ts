@@ -105,7 +105,7 @@ export interface ToolExecuteAfter {
   readonly input: unknown
   readonly status: "completed" | "error"
   result?: { output?: unknown; content?: unknown; metadata?: unknown }
-  error?: { message?: string }
+  error?: { message?: string; metadata?: unknown }
 }
 
 export interface ShellCreateBefore {

@@ -93,6 +93,17 @@ test("facade: session.messages refuses loudly without a V2 context read", async 
   )
 })
 
+test("facade: serverUrl is announced as a placeholder at load", () => {
+  // `serverUrl` is `new URL("http://127.0.0.1")` (src/context.ts) - a V1 plugin
+  // may build fetch URLs from it and fail silently against the wrong target, so
+  // the load must name the placeholder out loud.
+  const { lines } = facadeFor()
+  assert.ok(
+    lines.some((line) => line.includes("serverUrl is a placeholder") && line.includes("http://127.0.0.1")),
+    `the placeholder address must be named at load, got:\n${lines.join("\n")}`,
+  )
+})
+
 test("facade: session.children is refused out loud", () => {
   const { client, lines } = facadeFor()
 

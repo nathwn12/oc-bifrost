@@ -1,5 +1,25 @@
 # Changelog
 
+## 1.6.3 (2026-10-09)
+
+### Fixed
+
+- **A wired nested plugin now registers with its own id** (`src/wire-tui.ts`,
+  `src/index.ts`, `test/wire-tui.test.js`). A nested ref is registered into
+  `cli.json` as its tree DIRECTORY, and a directory load does not resolve
+  `package.json` `exports["."]`. The host therefore listed the plugin with no
+  id (`-`) even when the tree declared one - `oc-flight-deck` reported `-`
+  instead of `flight-deck.host`. `wireTui` now also ensures a marker-owned root
+  `index.ts` re-exporting the ref's declared server entry (`gh.meta.path`, from
+  the resolve provenance) - the server half of what the TUI wrapper is for the
+  TUI half. It never writes over a user-authored entry, removes itself when one
+  appears beside it, and refuses loudly when the declared entry is not a real
+  file inside the tree. The no-TUI skip path writes nothing.
+- **Tests** (`test/wire-tui.test.js`): seven new cases - wrapper written for the
+  declared target, idempotent repeat mount, no wrapper without the option, a
+  user entry never clobbered, a managed wrapper removed beside a user entry, a
+  loud refusal on a broken declaration, and no wrapper on the skip path.
+
 ## 1.6.2 (2026-10-09)
 
 ### Fixed

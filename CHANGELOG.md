@@ -1,5 +1,20 @@
 # Changelog
 
+## 1.5.0 (2026-10-09)
+
+### Changed
+
+- **Three `partial` compat rows behaviour-upgraded, each with a write-back test** (`src/hooks.ts`, `src/compat-matrix.ts`): `tool.execute.after` now writes `error.message` and metadata on the failure branch; `chat.message` writes back `prompt.files`, `prompt.agents`, and `prompt.skills`; `experimental.chat.system.transform` preserves the non-text parts it does not touch.
+- **Shape-aware alignment for `system.transform` + `messages.transform`** (`src/hooks.ts`): the write-back aligns returned messages by shape, so an add, remove, or reorder no longer misattributes an edit across messages.
+- **A non-string `input.tool` reassignment now warns** (`src/hooks.ts`): the bridged `tool.execute.before` input keeps the V1-era tool name, and a hook that replaces it with a non-string is warned about instead of silently corrupting the call.
+- **`serverUrl` placeholder + helper-only V1 mount warnings** (`src/context.ts`, `src/index.ts`): the facade states the `serverUrl` boundary out loud, and a V1 module that only carries helpers warns instead of mounting empty.
+- **V2 `setup` options forwarding** (`src/index.ts`): a V2 definition's own entry options reach its `setup` call instead of being dropped.
+- **Degraded message shape fixed** (`src/hooks.ts`): a degraded message always carries a string `role` and no `sessionID`.
+
+### Checks
+
+- `npm run check` green (304 pass, 1 skip, 0 fail).
+
 ## 1.4.5 (2026-10-07)
 
 ### Changed

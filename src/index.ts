@@ -42,6 +42,7 @@ import {
   type RegistrySpec,
 } from "./registry.js"
 import { wireTui } from "./wire-tui.js"
+import { readBifrostFileConfig, resolveBifrostOptions } from "./config-file.js"
 import type { BifrostOptions, OCContext, PluginEntry } from "./types.js"
 
 export { COMPAT_MATRIX, matrixRow } from "./compat-matrix.js"
@@ -196,7 +197,13 @@ export default Plugin.define({
   id: "oc.bifrost",
   async setup(ctx) {
     const context = ctx as unknown as OCContext
-    const options = (context.options ?? {}) as BifrostOptions
+    // A git spec cannot carry `options`, so a git-installed bridge reads
+    // `oc-bifrost.jsonc` from the OpenCode config dir as a fallback. An
+    // explicit option wins key-by-key: defaults < file < context.options.
+    const options = resolveBifrostOptions(
+      (context.options ?? {}) as BifrostOptions,
+      readBifrostFileConfig(),
+    )
     const entries = normalizeEntries(options)
     const cleanups: Array<() => void | Promise<void>> = []
     const directory = context.location?.directory ?? process.cwd()
@@ -224,7 +231,7 @@ export default Plugin.define({
     }
 
     if (entries.length === 0) {
-      const notice = "[oc-bifrost] no plugins configured; set options.plugins to bridge legacy plugins"
+      const notice = "[oc-bifrost] no plugins configured; set options.plugins to bridge legacy plugins (a git install lists them in oc-bifrost.jsonc instead)"
       console.warn(notice)
       sink.write(notice)
       return

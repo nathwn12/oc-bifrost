@@ -46,7 +46,61 @@ opencode plugin list      # shows what is actually loaded
 ```
 
 If the resolved version is wrong or stale, delete
-`~/.cache/opencode/npm/@nathwn12/oc-bifrost@latest` and reload — or pin an exact version.
+`~/.cache/opencode/npm/@nathwn12/oc-bifrost@latest` and reload - or pin an exact version.
+
+### 1b. Choose the install route - npm (stable) vs git (experimental)
+
+Both routes load the same bridge. Pick one per config entry:
+
+- **NPM - stable, slow release.** The pinned version spec (this page describes `1.6.3`):
+
+  ```jsonc
+  {
+    "plugins": [
+      {
+        "package": "@nathwn12/oc-bifrost@1.6.3",
+        "options": {
+          "plugins": ["<exactly one specifier - one of the three paths below>"],
+          "strict": false,
+          "verbose": true
+        }
+      }
+    ]
+  }
+  ```
+
+- **GITHUB - bleeding edge, experimental, unsupported.** The pinned-commit git spec -
+  replace `<sha>` with the commit you actually verified:
+
+  ```jsonc
+  {
+    "plugins": [
+      {
+        "package": "@nathwn12/oc-bifrost@git+https://github.com/nathwn12/oc-bifrost.git#<sha>"
+      }
+    ]
+  }
+  ```
+
+  The git route carries **no `options`** - a git spec cannot carry them, so the entry
+  above has none. The bridge reads its plugin list from `oc-bifrost.jsonc` in the
+  OpenCode config directory instead (`$OPENCODE_CONFIG_DIR` when set, else
+  `$XDG_CONFIG_HOME/opencode`, else `~/.config/opencode` - the config path from step 0,
+  never an assumed default):
+
+  ```jsonc
+  {
+    // $CONFIG/oc-bifrost.jsonc - the git route's plugin list (comments are fine)
+    "plugins": ["github:owner/repo"],
+    "strict": false,
+    "verbose": true
+  }
+  ```
+
+  An explicit `options` key still wins key-by-key over the file, so the npm route is
+  unaffected: when `options` is already supplied, nothing changes. Do not use the git
+  route in production - it tracks `main` at whatever commit you pin, has no release
+  notes, and may break without warning. State the route and the pinned sha in your report.
 
 ## 2. Mount the legacy plugin — one of three paths
 

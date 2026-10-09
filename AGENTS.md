@@ -57,3 +57,12 @@ npm run check     # typecheck + build + tests
 - Keep the checkout current: `git fetch origin --prune` and `--ff-only` sync `main` with `origin/main` before and after work; never leave it stale.
 - Release flow: land the fix on `main` -> `npm run check` green -> bump the version in `package.json`/`package-lock.json` + CHANGELOG + pins -> push to `main` -> owner runs `npm publish` -> update the live pin -> verify live from logs.
 - No local glue: never hand-create junctions, hand-edit `cli.json`, or point configs at cache copies to work around a product gap; fix the product instead.
+
+## Plugin release model
+
+- Two tracks: **npm** = slow/stable, tagged release only; **github** = fast/experimental, every push to `main` installable.
+- Install specs:
+  - npm: `"@nathwn12/oc-bifrost@1.6.3"`
+  - github package form: `"@nathwn12/oc-bifrost@git+https://github.com/nathwn12/oc-bifrost.git#<full sha>"`
+  - github directory form: `"github:nathwn12/oc-bifrost@<full sha>"` (no `#path`, requires the repo-root `index.ts`).
+- `main` is bleeding edge and never stable. A stable release is a **tag** `vX.Y.Z`, and that tag publishes to npm. Create `release/X.Y` only when cutting that minor line's first stable (patches/backports); branch per line, never per version. Cutting a tag publishes - it is an owner action.

@@ -69,10 +69,12 @@ Both routes load the same bridge. Pick one per config entry:
   }
   ```
 
-- **GITHUB - bleeding edge, experimental, unsupported (MEASURED: WORKS as package spec).** The pinned-commit git spec -
-  replace `<sha>` with the commit you actually verified. Measured working as
+- **GITHUB - bleeding edge, experimental, unsupported (MEASURED: CURRENTLY FAILS host-side).** The pinned-commit git spec
   `"@nathwn12/oc-bifrost@git+https://github.com/nathwn12/oc-bifrost.git#<full sha>"`
-  (host log shows it loading):
+  currently FAILS host-side: six `WARN "failed to load plugin"` lines with
+  `cause="Cause([Fail(NpmInstallFailedError (cause: Error: git dep preparation failed))])"`.
+  The package installs fine outside the harness, so this is a host limitation.
+  npm is the supported route - do not use the git route:
 
   ```jsonc
   {
@@ -101,8 +103,8 @@ Both routes load the same bridge. Pick one per config entry:
 
   An explicit `options` key still wins key-by-key over the file, so the npm route is
   unaffected: when `options` is already supplied, nothing changes. Do not use the git
-  route in production - it tracks `main` at whatever commit you pin, has no release
-  notes, and may break without warning. State the route and the pinned sha in your report.
+  route - it currently fails host-side (`git dep preparation failed`), tracks `main`
+  at whatever commit you pin, has no release notes, and may break without warning.
 
 - **NO-NPM (directory entry - local path MEASURED: WORKS; bare `github:` form MEASURED: DOES NOT WORK).** Point the bridge entry at a local clone of this repo -
   `"package": "<path to repo>"` - carrying the same `options` as the npm route

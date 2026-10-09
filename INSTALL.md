@@ -52,7 +52,7 @@ If the resolved version is wrong or stale, delete
 
 Both routes load the same bridge. Pick one per config entry:
 
-- **NPM - stable, slow release.** The pinned version spec (this page describes `1.6.3`):
+- **NPM - stable, slow release (MEASURED: WORKS).** The pinned version spec (this page describes `1.6.3`):
 
   ```jsonc
   {
@@ -69,8 +69,10 @@ Both routes load the same bridge. Pick one per config entry:
   }
   ```
 
-- **GITHUB - bleeding edge, experimental, unsupported.** The pinned-commit git spec -
-  replace `<sha>` with the commit you actually verified:
+- **GITHUB - bleeding edge, experimental, unsupported (MEASURED: WORKS as package spec).** The pinned-commit git spec -
+  replace `<sha>` with the commit you actually verified. Measured working as
+  `"@nathwn12/oc-bifrost@git+https://github.com/nathwn12/oc-bifrost.git#<full sha>"`
+  (host log shows it loading):
 
   ```jsonc
   {
@@ -102,12 +104,14 @@ Both routes load the same bridge. Pick one per config entry:
   route in production - it tracks `main` at whatever commit you pin, has no release
   notes, and may break without warning. State the route and the pinned sha in your report.
 
-- **NO-NPM (directory entry).** Point the bridge entry at a local clone of this repo -
-  `"package": "<path to repo>"` - carrying the same `options` as the npm route. Once
-  pushed, the non-local form is
-  `"package": "github:nathwn12/oc-bifrost@d6b7d3338281aa87f946013c75eb1fb2f00d54bf"`
-  - pending live verification, not yet verified. This route needs the repo's `index.ts`
-  and involves no npm install; it is the mechanism superpowers uses.
+- **NO-NPM (directory entry - local path MEASURED: WORKS; bare `github:` form MEASURED: DOES NOT WORK).** Point the bridge entry at a local clone of this repo -
+  `"package": "<path to repo>"` - carrying the same `options` as the npm route
+  (MEASURED: WORKS - it requires the repo-root `index.ts` and involves no npm install;
+  it is the mechanism superpowers uses). The bare
+  `"package": "github:nathwn12/oc-bifrost@<full sha>"` directory form with no `#path`
+  DOES NOT LOAD - measured result, not pending: it produced no load, only
+  `NpmInstallFailedError (cause: Error: An unknown git error occurred)`. Same for the
+  `#` and `#index.ts` variants. Do not use it.
 
 ## 2. Mount the legacy plugin — one of three paths
 

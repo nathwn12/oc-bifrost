@@ -13,3 +13,6 @@ legacy/cache/
 .superpowers/
 # Isolated git worktrees for feature work
 .worktrees/
+
+# Local-only agent guidance; never pushed.
+AGENTS.md

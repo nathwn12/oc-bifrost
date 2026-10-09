@@ -102,6 +102,13 @@ Both routes load the same bridge. Pick one per config entry:
   route in production - it tracks `main` at whatever commit you pin, has no release
   notes, and may break without warning. State the route and the pinned sha in your report.
 
+- **NO-NPM (directory entry).** Point the bridge entry at a local clone of this repo -
+  `"package": "<path to repo>"` - carrying the same `options` as the npm route. Once
+  pushed, the non-local form is
+  `"package": "github:nathwn12/oc-bifrost@d6b7d3338281aa87f946013c75eb1fb2f00d54bf"`
+  - pending live verification, not yet verified. This route needs the repo's `index.ts`
+  and involves no npm install; it is the mechanism superpowers uses.
+
 ## 2. Mount the legacy plugin — one of three paths
 
 | # | Path | Use when |

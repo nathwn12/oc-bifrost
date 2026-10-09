@@ -64,5 +64,4 @@ npm run check     # typecheck + build + tests
 - Install specs:
   - npm: `"@nathwn12/oc-bifrost@1.6.3"`
   - github package form: `"@nathwn12/oc-bifrost@git+https://github.com/nathwn12/oc-bifrost.git#<full sha>"`
-  - github directory form: `"github:nathwn12/oc-bifrost@<full sha>"` (no `#path`, requires the repo-root `index.ts`).
 - `main` is bleeding edge and never stable. A stable release is a **tag** `vX.Y.Z`, and that tag publishes to npm. Create `release/X.Y` only when cutting that minor line's first stable (patches/backports); branch per line, never per version. Cutting a tag publishes - it is an owner action.

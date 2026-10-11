@@ -1204,13 +1204,23 @@ const DEMO_DEP = {
   "index.js": 'export const tag = "provisioned"\n',
 }
 
-/** A fake `npm` on PATH that exits with `exitCode` (mirrors test/provision.test.js). */
-function setFakeNpm(shimDir, exitCode) {
+/** A fake npm CLI entry run via `process.execPath` that exits with `exitCode` (mirrors test/provision.test.js). */
+function setFakeNpmCli(shimDir, exitCode) {
   fs.mkdirSync(shimDir, { recursive: true })
-  if (process.platform === "win32") {
-    fs.writeFileSync(path.join(shimDir, "npm.cmd"), `@echo off\nexit /b ${exitCode}\r\n`)
-  } else {
-    fs.writeFileSync(path.join(shimDir, "npm"), `#!/bin/sh\nexit ${exitCode}\n`, { mode: 0o755 })
+  const cli = path.join(shimDir, "npm-cli.js")
+  fs.writeFileSync(cli, `process.exit(${Number(exitCode)});\n`)
+  return cli
+}
+
+/** Point `npm_execpath` at the fake CLI entry for the duration of `fn`, restoring afterwards. */
+async function withNpmCli(cli, fn) {
+  const saved = process.env.npm_execpath
+  process.env.npm_execpath = cli
+  try {
+    return await fn()
+  } finally {
+    if (saved === undefined) delete process.env.npm_execpath
+    else process.env.npm_execpath = saved
   }
 }
 
@@ -1445,9 +1455,9 @@ test("resolveGithubPlugin: a provision refusal under strict: true aborts with th
     const emptyStore = path.join(root, "empty-store")
     fs.mkdirSync(emptyStore, { recursive: true })
     const shimDir = path.join(root, "shim")
-    setFakeNpm(shimDir, 1)
-    const savedPath = process.env.PATH
-    process.env.PATH = shimDir + path.delimiter + (savedPath ?? "")
+    const cli = setFakeNpmCli(shimDir, 1)
+    const savedNpmExecpath = process.env.npm_execpath
+    process.env.npm_execpath = cli
     try {
       await assert.rejects(
         () =>
@@ -1477,7 +1487,8 @@ test("resolveGithubPlugin: a provision refusal under strict: true aborts with th
         `rows: ${JSON.stringify(tolerated.provision)}`,
       )
     } finally {
-      process.env.PATH = savedPath
+      if (savedNpmExecpath === undefined) delete process.env.npm_execpath
+      else process.env.npm_execpath = savedNpmExecpath
     }
   } finally {
     fs.rmSync(root, { recursive: true, force: true })
@@ -1582,9 +1593,9 @@ test('resolveGithubPlugin: a successful npm run rows ONE "npm install --no-save"
     const emptyStore = path.join(root, "empty-store")
     fs.mkdirSync(emptyStore, { recursive: true })
     const shimDir = path.join(root, "shim")
-    setFakeNpm(shimDir, 0)
-    const savedPath = process.env.PATH
-    process.env.PATH = shimDir + path.delimiter + (savedPath ?? "")
+    setFakeNpmCli(shimDir, 0)
+    const savedPath = process.env.npm_execpath
+    process.env.npm_execpath = path.join(shimDir, "npm-cli.js")
     const twoDepTree = {
       "package.json": JSON.stringify({
         name: "fixture",
@@ -1629,7 +1640,8 @@ test('resolveGithubPlugin: a successful npm run rows ONE "npm install --no-save"
       })
       assert.equal(followUp.fetched, false, "the follow-up load must serve the verified cache")
     } finally {
-      process.env.PATH = savedPath
+      if (savedPath === undefined) delete process.env.npm_execpath
+      else process.env.npm_execpath = savedPath
     }
   } finally {
     fs.rmSync(root, { recursive: true, force: true })
@@ -1640,9 +1652,9 @@ test("resolveGithubPlugin: a marker write failure degrades to a loud row and lea
   const root = tmpRoot()
   try {
     const shimDir = path.join(root, "shim")
-    setFakeNpm(shimDir, 0)
-    const savedPath = process.env.PATH
-    process.env.PATH = shimDir + path.delimiter + (savedPath ?? "")
+    setFakeNpmCli(shimDir, 0)
+    const savedCli = process.env.npm_execpath
+    process.env.npm_execpath = path.join(shimDir, "npm-cli.js")
     // A file-shaped node_modules ships in the tarball: the npm run "succeeds"
     // (exit 0, installs nothing), the npm actions land, and the MARKER write
     // cannot - yet the fetch itself is complete and must NOT be rolled back
@@ -1672,7 +1684,8 @@ test("resolveGithubPlugin: a marker write failure degrades to a loud row and lea
       })
       assert.equal(followUp.fetched, false, "the follow-up must serve the verified cache")
     } finally {
-      process.env.PATH = savedPath
+      if (savedCli === undefined) delete process.env.npm_execpath
+      else process.env.npm_execpath = savedCli
     }
   } finally {
     fs.rmSync(root, { recursive: true, force: true })

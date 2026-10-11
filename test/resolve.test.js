@@ -113,36 +113,28 @@ test("provisionMode: an invalid value is a loud refusal naming the valid modes, 
   assert.throws(() => provisionMode("bogus", {}), /invalid provision mode/)
 })
 
-/** A fake `npm` on PATH: writes a marker + its args, then exits with `exitCode`. */
-function installFakeNpm(shimDir, { marker, argsFile, exitCode = 0 }) {
+/** A fake npm CLI entry run via `process.execPath`: writes a marker + its args, then exits with `exitCode`. */
+function installFakeNpmCli(shimDir, { marker, argsFile, exitCode = 0 }) {
   fs.mkdirSync(shimDir, { recursive: true })
-  if (process.platform === "win32") {
-    const content = [
-      "@echo off",
-      `echo invoked > "${marker}"`,
-      `echo %* > "${argsFile}"`,
-      `exit /b ${exitCode}`,
-      "",
-    ].join("\r\n")
-    fs.writeFileSync(path.join(shimDir, "npm.cmd"), content)
-  } else {
-    const content =
-      `#!/bin/sh\n` +
-      `printf 'invoked\\n' > "${marker}"\n` +
-      `printf '%s\\n' "$*" > "${argsFile}"\n` +
-      `exit ${exitCode}\n`
-    fs.writeFileSync(path.join(shimDir, "npm"), content, { mode: 0o755 })
-  }
+  const cli = path.join(shimDir, "npm-cli.js")
+  const content =
+    `const fs = require("node:fs");\n` +
+    `try { fs.writeFileSync(${JSON.stringify(marker)}, "invoked\\n"); } catch {}\n` +
+    `try { fs.writeFileSync(${JSON.stringify(argsFile)}, process.argv.slice(2).join(" ") + "\\n"); } catch {}\n` +
+    `process.exit(${Number(exitCode)});\n`
+  fs.writeFileSync(cli, content)
+  return cli
 }
 
-/** Prepend shimDir to PATH for the duration of `fn`, restoring afterwards. */
-async function withPath(shimDir, fn) {
-  const saved = process.env.PATH
-  process.env.PATH = shimDir + path.delimiter + (saved ?? "")
+/** Point `npm_execpath` at the fake CLI entry for the duration of `fn`, restoring afterwards. */
+async function withNpmCli(cli, fn) {
+  const saved = process.env.npm_execpath
+  process.env.npm_execpath = cli
   try {
     return await fn()
   } finally {
-    process.env.PATH = saved
+    if (saved === undefined) delete process.env.npm_execpath
+    else process.env.npm_execpath = saved
   }
 }
 
@@ -191,12 +183,12 @@ test("OC_BIFROST_PROVISION=npm drives the npm install fallback through the real 
     const shimDir = path.join(root, "bin")
     const marker = path.join(root, "npm-invoked.txt")
     const argsFile = path.join(root, "npm-args.txt")
-    installFakeNpm(shimDir, { marker, argsFile, exitCode: 0 })
+    const cli = installFakeNpmCli(shimDir, { marker, argsFile, exitCode: 0 })
 
     const savedProvision = process.env.OC_BIFROST_PROVISION
     process.env.OC_BIFROST_PROVISION = "npm"
     try {
-      const result = await withPath(shimDir, () =>
+      const result = await withNpmCli(cli, () =>
         resolveGithubPlugin(spec, { cacheRoot: root, trusted: true, hostStores: [store] }),
       )
       assert.equal(result.fetched, false, "the warm cache must load with zero network")

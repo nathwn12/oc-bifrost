@@ -54,36 +54,28 @@ function writePackage(storeRoot, pkgPath, files) {
   return dir
 }
 
-/** A fake `npm` on PATH: writes a marker + its args, then exits with `exitCode`. */
-function installFakeNpm(shimDir, { marker, argsFile, exitCode = 0 }) {
+/** A fake npm CLI entry run via `process.execPath`: writes a marker + its args, then exits with `exitCode`. */
+function installFakeNpmCli(shimDir, { marker, argsFile, exitCode = 0 }) {
   fs.mkdirSync(shimDir, { recursive: true })
-  if (process.platform === "win32") {
-    const content = [
-      "@echo off",
-      `echo invoked > "${marker}"`,
-      `echo %* > "${argsFile}"`,
-      `exit /b ${exitCode}`,
-      "",
-    ].join("\r\n")
-    fs.writeFileSync(path.join(shimDir, "npm.cmd"), content)
-  } else {
-    const content =
-      `#!/bin/sh\n` +
-      `printf 'invoked\\n' > "${marker}"\n` +
-      `printf '%s\\n' "$*" > "${argsFile}"\n` +
-      `exit ${exitCode}\n`
-    fs.writeFileSync(path.join(shimDir, "npm"), content, { mode: 0o755 })
-  }
+  const cli = path.join(shimDir, "npm-cli.js")
+  const content =
+    `const fs = require("node:fs");\n` +
+    `try { fs.writeFileSync(${JSON.stringify(marker)}, "invoked\\n"); } catch {}\n` +
+    `try { fs.writeFileSync(${JSON.stringify(argsFile)}, process.argv.slice(2).join(" ") + "\\n"); } catch {}\n` +
+    `process.exit(${Number(exitCode)});\n`
+  fs.writeFileSync(cli, content)
+  return cli
 }
 
-/** Prepend shimDir to PATH for the duration of `fn`, restoring afterwards. */
-async function withPath(shimDir, fn) {
-  const saved = process.env.PATH
-  process.env.PATH = shimDir + path.delimiter + (saved ?? "")
+/** Point `npm_execpath` at the fake CLI entry for the duration of `fn`, restoring afterwards. */
+async function withNpmCli(cli, fn) {
+  const saved = process.env.npm_execpath
+  process.env.npm_execpath = cli
   try {
     return await fn()
   } finally {
-    process.env.PATH = saved
+    if (saved === undefined) delete process.env.npm_execpath
+    else process.env.npm_execpath = saved
   }
 }
 
@@ -373,9 +365,9 @@ test("provisionTree: npm fallback spawns `npm install --no-save --prefix <tree>`
     const shimDir = path.join(root, "bin")
     const marker = path.join(root, "npm-marker.txt")
     const argsFile = path.join(root, "npm-args.txt")
-    installFakeNpm(shimDir, { marker, argsFile, exitCode: 0 })
+    const cli = installFakeNpmCli(shimDir, { marker, argsFile, exitCode: 0 })
 
-    const report = await withPath(shimDir, () => provisionTree(tree, { npm: true }))
+    const report = await withNpmCli(cli, () => provisionTree(tree, { npm: true }))
 
     assert.equal(fs.existsSync(marker), true, "the fake npm must have been invoked")
     assert.equal(fs.readFileSync(argsFile, "utf8").trim(), `install --no-save --legacy-peer-deps --prefix ${tree}`)
@@ -398,9 +390,9 @@ test("provisionTree: a failing npm install refuses the package without throwing"
     const shimDir = path.join(root, "bin")
     const marker = path.join(root, "npm-marker.txt")
     const argsFile = path.join(root, "npm-args.txt")
-    installFakeNpm(shimDir, { marker, argsFile, exitCode: 1 })
+    const cli = installFakeNpmCli(shimDir, { marker, argsFile, exitCode: 1 })
 
-    const report = await withPath(shimDir, () => provisionTree(tree, { npm: true }))
+    const report = await withNpmCli(cli, () => provisionTree(tree, { npm: true }))
 
     assert.equal(fs.existsSync(marker), true, "npm must have been attempted")
     assert.deepEqual(report.actions, [])

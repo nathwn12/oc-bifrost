@@ -45,15 +45,17 @@ export function resolveBifrostConfigPath(dir, env, homeDirectory) {
     return path.join(dir ?? resolveBifrostConfigDir(env, homeDirectory ?? os.homedir()), BIFROST_CONFIG_FILENAME);
 }
 /**
- * Parse JSONC the way oc-collections does: strip `//` line comments and
- * trailing commas, string-aware (never inside strings). Never called with
- * untrusted network input - only the operator's own config file.
+ * Parse JSONC the way oc-collections does: strip line comments and block
+ * comments plus trailing commas, string-aware (never inside strings).
+ * Never called with untrusted network input - only the operator's own
+ * config file.
  */
 export function parseBifrostJsonc(text) {
     let stripped = "";
     let inString = false;
     let escaped = false;
     let inLineComment = false;
+    let inBlockComment = false;
     for (let i = 0; i < text.length; i++) {
         const char = text[i];
         const next = text[i + 1];
@@ -62,6 +64,17 @@ export function parseBifrostJsonc(text) {
                 inLineComment = false;
                 stripped += char;
             }
+            continue;
+        }
+        if (inBlockComment) {
+            // Keep newlines so line positions survive the strip; drop everything else.
+            if (char === "*" && next === "/") {
+                inBlockComment = false;
+                i += 1;
+                continue;
+            }
+            if (char === "\n")
+                stripped += char;
             continue;
         }
         if (inString) {
@@ -81,6 +94,11 @@ export function parseBifrostJsonc(text) {
         }
         if (char === "/" && next === "/") {
             inLineComment = true;
+            i += 1;
+            continue;
+        }
+        if (char === "/" && next === "*") {
+            inBlockComment = true;
             i += 1;
             continue;
         }

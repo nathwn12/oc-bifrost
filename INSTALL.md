@@ -21,7 +21,7 @@ package itself — there is no separate `npm i` step:
 {
   "plugins": [
     {
-      "package": "@nathwn12/oc-bifrost@1.6.3",
+      "package": "@nathwn12/oc-bifrost@1.6.4",
       "options": {
         "plugins": ["<exactly one specifier — one of the three paths below>"],
         "strict": false,
@@ -34,7 +34,7 @@ package itself — there is no separate `npm i` step:
 
 ### 1a. Choose the version form — then verify what resolved
 
-**Pin an exact version:** `"@nathwn12/oc-bifrost@1.6.3"` - the default and the version this page
+**Pin an exact version:** `"@nathwn12/oc-bifrost@1.6.4"` - the default and the version this page
 describes. `@^1.0.0` tracks 1.x and never adopts a new major silently. A bare `@nathwn12/oc-bifrost` or
 `@latest` may be unstable while OpenCode's plugin cache settles. State the form you used in your report.
 
@@ -48,17 +48,17 @@ opencode plugin list      # shows what is actually loaded
 If the resolved version is wrong or stale, delete
 `~/.cache/opencode/npm/@nathwn12/oc-bifrost@latest` and reload - or pin an exact version.
 
-### 1b. Choose the install route - npm (stable) vs git (experimental)
+### 1b. Choose the install route - npm (tracks `main` 1:1) vs git (experimental)
 
 Both routes load the same bridge. Pick one per config entry:
 
-- **NPM - stable, slow release (MEASURED: WORKS).** The pinned version spec (this page describes `1.6.3`):
+- **NPM - tracks `main` 1:1: every fix on `main` releases to npm as the next patch (MEASURED: WORKS).** The pinned version spec (this page describes `1.6.4`):
 
   ```jsonc
   {
     "plugins": [
       {
-        "package": "@nathwn12/oc-bifrost@1.6.3",
+        "package": "@nathwn12/oc-bifrost@1.6.4",
         "options": {
           "plugins": ["<exactly one specifier - one of the three paths below>"],
           "strict": false,
@@ -170,7 +170,7 @@ downloaded and both opt-ins:
 - Opt in on the bridge entry, or via the environment:
 
   ```jsonc
-  { "package": "@nathwn12/oc-bifrost@1.6.3", "options": { "trustRemote": true, "plugins": ["github:obra/superpowers"] } }
+  { "package": "@nathwn12/oc-bifrost@1.6.4", "options": { "trustRemote": true, "plugins": ["github:obra/superpowers"] } }
   ```
 
   `OC_BIFROST_TRUST=github` does the same from the environment; an explicit `trustRemote: false`

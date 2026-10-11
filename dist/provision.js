@@ -30,10 +30,11 @@
  *      oc-flight-deck tree: `solid-js@1.9.15` vs `@opentui/solid@0.5.12`'s
  *      exact `peer solid-js@1.9.12`); `--legacy-peer-deps` is npm's own
  *      documented remedy and lets the tree's own pins win. npm is
- *      SPAWNED, never imported (`"dependencies": {}` holds). On Windows the
- *      spawn goes through `cmd.exe /d /c npm.cmd` (Node does not resolve
- *      `.cmd` via PATHEXT without a shell, and `shell: true` is never used);
- *      elsewhere it is a plain `npm` spawn.
+ *      SPAWNED, never imported (`"dependencies": {}` holds). The spawn is
+ *      always direct (`spawnSync` with `shell: false` and an argv array):
+ *      npm's own JS entry (`npm-cli.js`) runs through the current JS runtime
+ *      (`process.execPath`), never the `npm.cmd` shim via a shell; where no
+ *      CLI entry is found off Windows, `npm` itself is spawned directly.
  *   3. FAIL LOUDLY, AS A REPORT. A dependency that cannot be satisfied (no
  *      host-store hit and npm disabled or failing) is recorded in `refused` -
  *      never thrown here; the caller decides strictness (Task 2).
@@ -387,16 +388,64 @@ function linkIntoTree(source, dest) {
         return false;
     }
 }
-/** Run `npm install --no-save --legacy-peer-deps --prefix <treeDir>`; true when it exits 0. */
+/**
+ * Locate npm's own JS entry (`npm-cli.js`) without touching the `npm.cmd`
+ * shim: the shim is a `.cmd` file, so it can only run via a shell - the very
+ * boundary this provisioner must never cross. Probes the runtime's own layout
+ * first (`npm_execpath` when running under npm, then beside `process.execPath`
+ * in both the Windows and posix install layouts). Returns `undefined` when no
+ * entry is found. Mirrors `src/registry.ts` (`npmCliEntry`).
+ */
+function npmCliEntry() {
+    const candidates = [];
+    if (process.env.npm_execpath)
+        candidates.push(process.env.npm_execpath);
+    const exeDir = path.dirname(process.execPath);
+    candidates.push(path.join(exeDir, "node_modules", "npm", "bin", "npm-cli.js"), path.join(exeDir, "..", "lib", "node_modules", "npm", "bin", "npm-cli.js"));
+    for (const candidate of candidates) {
+        try {
+            if (fs.lstatSync(candidate).isFile())
+                return candidate;
+        }
+        catch {
+            // Not here - try the next candidate.
+        }
+    }
+    return undefined;
+}
+/**
+ * Run `npm install --no-save --legacy-peer-deps --prefix <treeDir>`; true when it exits 0.
+ *
+ * SECURITY - no user-controlled text may ever cross a shell boundary. The
+ * install runs DIRECTLY (`spawnSync` with `shell: false` and an argv array),
+ * never through `cmd.exe /c` or any other shell: npm's own JS entry
+ * (`npm-cli.js`) runs through the current JS runtime (`process.execPath`), so
+ * `--prefix <treeDir>` travels as one argv element - metacharacters in the
+ * env-derived cache root reach npm as data, never as shell syntax. When no CLI
+ * entry is found the npm fallback is unavailable on Windows (the `npm.cmd`
+ * shim is never run through a shell); elsewhere `npm` is spawned directly.
+ */
 function runNpmInstall(treeDir) {
-    const args = ["install", "--no-save", "--legacy-peer-deps", "--prefix", treeDir];
-    const result = process.platform === "win32"
-        ? spawnSync(process.env.ComSpec ?? "cmd.exe", ["/d", "/c", "npm.cmd", ...args], {
-            encoding: "utf8",
-            windowsHide: true,
-            cwd: os.tmpdir(),
-        })
-        : spawnSync("npm", args, { encoding: "utf8", windowsHide: true, cwd: os.tmpdir() });
+    const cli = npmCliEntry();
+    let command;
+    let args;
+    if (cli !== undefined) {
+        command = process.execPath;
+        args = [cli, "install", "--no-save", "--legacy-peer-deps", "--prefix", treeDir];
+    }
+    else if (process.platform !== "win32") {
+        command = "npm";
+        args = ["install", "--no-save", "--legacy-peer-deps", "--prefix", treeDir];
+    }
+    else {
+        return false;
+    }
+    const result = spawnSync(command, args, {
+        encoding: "utf8",
+        windowsHide: true,
+        cwd: os.tmpdir(),
+        shell: false,
+    });
     return result.status === 0;
 }
 export async function provisionTree(treeDir, opts) {

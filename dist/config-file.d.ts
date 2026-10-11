@@ -9,9 +9,10 @@ export declare function resolveBifrostConfigDir(env?: NodeJS.ProcessEnv, homeDir
 /** The config file path: `<config dir>/oc-bifrost.jsonc`. */
 export declare function resolveBifrostConfigPath(dir?: string, env?: NodeJS.ProcessEnv, homeDirectory?: string): string;
 /**
- * Parse JSONC the way oc-collections does: strip `//` line comments and
- * trailing commas, string-aware (never inside strings). Never called with
- * untrusted network input - only the operator's own config file.
+ * Parse JSONC the way oc-collections does: strip line comments and block
+ * comments plus trailing commas, string-aware (never inside strings).
+ * Never called with untrusted network input - only the operator's own
+ * config file.
  */
 export declare function parseBifrostJsonc(text: string): unknown;
 /**

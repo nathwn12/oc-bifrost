@@ -60,8 +60,8 @@ npm run check     # typecheck + build + tests
 
 ## Plugin release model
 
-- Two tracks: **npm** = slow/stable, tagged release only; **github** = fast/experimental, every push to `main` installable.
+- Exception to the house two-track model: for this repo **npm tracks `main` 1:1** - a fix on `main` releases to npm as the next patch. There is no slow/stable npm track here.
 - Install specs:
-  - npm: `"@nathwn12/oc-bifrost@1.6.3"`
+  - npm: `"@nathwn12/oc-bifrost@1.6.4"`
   - github package form: `"@nathwn12/oc-bifrost@git+https://github.com/nathwn12/oc-bifrost.git#<full sha>"`
-- `main` is bleeding edge and never stable. A stable release is a **tag** `vX.Y.Z`, and that tag publishes to npm. Create `release/X.Y` only when cutting that minor line's first stable (patches/backports); branch per line, never per version. Cutting a tag publishes - it is an owner action.
+- `main` is the release line: every fix lands on `main` and ships to npm as the next patch via tag `vX.Y.Z`. Create `release/X.Y` only when cutting that minor line's first stable (patches/backports); branch per line, never per version. Cutting a tag publishes - it is an owner action.

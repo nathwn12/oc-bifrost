@@ -278,9 +278,9 @@ export async function registerV1Hooks(ctx, hooks, reporter) {
                     .map((part) => part.text)
                 : [];
             const partsJoin = textParts.join("");
-            const rewritten = typeof content === "string" && content !== original && content.length > 0
+            const rewritten = typeof content === "string" && content !== original
                 ? content
-                : partsJoin !== original && partsJoin.length > 0
+                : textParts.length > 0 && partsJoin !== original
                     ? partsJoin
                     : original;
             if (prompt) {
@@ -294,7 +294,7 @@ export async function registerV1Hooks(ctx, hooks, reporter) {
                     prompt.skills = message.skills;
             }
         });
-        reporter.record("chat.message", "partial", "prompt hook; pre-filled V1 message/parts -> event.prompt.text/files/agents/skills write-back; non-text content parts ignored");
+        reporter.record("chat.message", "partial", "prompt hook; pre-filled V1 message/parts -> event.prompt.text/files/agents/skills write-back; non-text content parts ignored; an empty string rewrite clears the prompt");
     }
     /* ---------------- permission.ask ---------------- */
     const permissionAsk = asHandler(table["permission.ask"]);
@@ -490,7 +490,9 @@ export async function registerV1Hooks(ctx, hooks, reporter) {
                     reporter.warn(`event hook threw: ${error.message}`);
                 }
             }
-        })();
+        })().catch((error) => {
+            reporter.warn(`event subscription failed: ${error?.message ?? String(error)}`);
+        });
         reporter.record("event", "partial", "V2 session.execution.succeeded|failed|interrupted -> V1 session.idle envelope; other names/payloads pass through");
     }
     /* ---------------- dispose ---------------- */

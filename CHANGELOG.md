@@ -1,5 +1,35 @@
 # Changelog
 
+## 1.6.4 (2026-10-11)
+
+### Fixed
+
+- **JSONC block comments, unhandled subscribe rejection, mount accounting**
+  (`src/config-file.ts`, `src/hooks.ts`, `src/index.ts`). `parseBifrostJsonc`
+  now strips `/* */` block comments as well as `//` line comments,
+  string-aware (never inside strings), keeping newlines so line positions
+  survive the strip. The `event` subscription's async fire-and-forget body now
+  reports `event subscription failed` instead of surfacing an unhandled
+  rejection. A refused effect-only V2 definition no longer gains
+  package-level `mounted` rows nor the mounted-gated freshness/TUI side
+  effects (`setupRan` stays false, so `mounted` stays false). An empty-string
+  `chat.message` rewrite now clears the prompt instead of falling back to the
+  original text.
+- **Spawn npm directly instead of through `cmd.exe`** (`src/provision.ts`,
+  `test/github.test.js`, `test/provision.test.js`, `test/resolve.test.js`).
+  The npm fallback no longer goes through `cmd.exe /d /c npm.cmd` on Windows
+  (the `.cmd` shim can only run via a shell - the very boundary the
+  provisioner must never cross). It now runs npm's own JS entry (`npm-cli.js`,
+  probed via `npm_execpath` then beside `process.execPath`, mirroring
+  `src/registry.ts`) through the current JS runtime with `shell: false` and
+  an argv array, so `--prefix <treeDir>` travels as one argv element. Where no
+  CLI entry is found the fallback is unavailable on Windows instead of
+  reaching for a shell; elsewhere `npm` itself is spawned directly.
+
+### Checks
+
+- `npm run check` green (347 pass, 2 skip, 0 fail).
+
 ## 1.6.3 (2026-10-09)
 
 ### Fixed

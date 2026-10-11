@@ -345,6 +345,7 @@ export default Plugin.define({
       }
 
       let mounted = false
+      let setupRan = true
       try {
         if (shape.kind === "v2") {
           if (typeof shape.definition.setup === "function") {
@@ -362,6 +363,10 @@ export default Plugin.define({
               "unsupported",
               "effect-only V2 definitions are not mountable as a promise plugin",
             )
+            // Refused, not mounted: the setup never executed, so the entry
+            // must not gain package-level "mounted" rows nor the mounted-gated
+            // freshness/TUI side effects below.
+            setupRan = false
           }
         } else {
           const v1Context = buildV1Context(context, reporter)
@@ -379,14 +384,14 @@ export default Plugin.define({
           cleanups.push(...registered.cleanups)
           reporter.record(`v1:${shape.id}`, "mounted", shape.note ?? "V1 factory")
         }
-        if (resolved.kind === "preset" && presetNote) {
+        if (setupRan && resolved.kind === "preset" && presetNote) {
           reporter.record(`preset:${resolved.id}`, "mounted", presetNote)
-        } else if (resolved.kind === "github" && githubNote) {
+        } else if (setupRan && resolved.kind === "github" && githubNote) {
           reporter.record(`github:${resolved.spec.owner}/${resolved.spec.repo}`, "mounted", githubNote)
-        } else if (resolved.kind === "registry" && registryNote) {
+        } else if (setupRan && resolved.kind === "registry" && registryNote) {
           reporter.record(`registry:${resolved.spec.bare}`, "mounted", registryNote)
         }
-        mounted = true
+        mounted = setupRan
       } catch (error) {
         reporter.warn(`failed to mount "${entry.spec}": ${(error as Error).message}`)
         if (options.strict) throw error

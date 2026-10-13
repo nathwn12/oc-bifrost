@@ -10,8 +10,12 @@
  * SECURITY — no command is ever a shell string. The tagged template is
  * composed into an ARGV array and spawned directly (`shell: false`): the
  * literal text is split into words with `'`/`"` grouping honoured, and every
- * interpolated value becomes exactly ONE argv element — data the OS hands to
- * the program, never syntax a shell re-parses. The earlier defect composed a
+ * interpolated value is data the OS hands to the program, never syntax a shell
+ * re-parses. Word and quote state is carried ACROSS template segments, the way
+ * one shell collapses a template to one command line: a value glued to literal
+ * text stays part of that word, and a value the literal text quotes groups into
+ * one argv element — a value is never re-split, and is never the reason a quote
+ * is left open. The earlier defect composed a
  * command string and spawned it with `shell: true`: an interpolated value such
  * as `x" & echo INJECTED` ended the quoting and `cmd.exe` ran the second
  * command as the user. Because no shell remains, syntax only a shell could
@@ -38,86 +42,107 @@ const WORD_START_SYNTAX = /[~#]/;
  */
 const EXPANSION = /^\$\{[A-Za-z_][A-Za-z0-9_]*\}|^\$\(|^\$[A-Za-z_0-9][A-Za-z0-9_]*|^%[A-Za-z_][^%]*%/;
 /**
- * Split one literal template segment into argv words.
+ * The argv under construction, carried ACROSS template segments.
  *
- * `'` and `"` group a word — the grouping a shell performs — so a caller that
- * already quoted a literal argument keeps working. Everything else is taken
- * literally, and any character that only a shell could have interpreted is
- * refused by name: with no shell behind it, such text can no longer mean what
- * it meant, and passing it through as data would be a silent lie.
+ * A shell collapses a whole tagged template into one command line, so word and
+ * quote state lives here rather than inside a single segment's scan: a word the
+ * literal text opened is still open after an interpolation, and a quote the
+ * literal text opened is still open after it — `pre${x}post` is one word, and
+ * `"${x}"` groups the value into one argv element.
+ *
+ * `literal()` scans only literal text, and refuses by name any character only a
+ * shell could have interpreted — with no shell behind it, such text can no
+ * longer mean what it meant, and passing it through as data would be a silent
+ * lie. `value()` takes an interpolated value and never scans it: quote
+ * characters, spaces, `$`, `%` and shell syntax inside a value are data, and the
+ * value is never re-split, so a value can never become a second command or a
+ * second argument.
  */
-function splitWords(segment) {
-    const words = [];
-    let word = "";
-    let started = false;
-    let quote;
-    for (let i = 0; i < segment.length; i += 1) {
-        const char = segment[i];
-        if (quote !== undefined) {
-            if (char === quote)
-                quote = undefined;
-            else
-                word += char;
-            started = true;
-            continue;
-        }
-        if (char === '"' || char === "'") {
-            quote = char;
-            started = true;
-            continue;
-        }
-        if (char === " " || char === "\t") {
-            if (started) {
-                words.push(word);
-                word = "";
-                started = false;
+class ArgvBuilder {
+    words = [];
+    word = "";
+    started = false;
+    quote;
+    /** The literal segment that left a quote open, for the refusal message. */
+    quoteOrigin = "";
+    /** Scan one literal template segment, honouring state left open before it. */
+    literal(segment) {
+        for (let i = 0; i < segment.length; i += 1) {
+            const char = segment[i];
+            if (this.quote !== undefined) {
+                if (char === this.quote)
+                    this.quote = undefined;
+                else
+                    this.word += char;
+                this.started = true;
+                continue;
             }
-            continue;
-        }
-        if (char === "$" || char === "%") {
-            const expansion = segment.slice(i).match(EXPANSION);
-            if (expansion !== null) {
-                fail(`refusing to run ${JSON.stringify(segment)}: the command text carries the shell expansion ` +
-                    `${JSON.stringify(expansion[0])}, which no shell performs here; pass the value as an interpolation instead`);
+            if (char === '"' || char === "'") {
+                this.quote = char;
+                this.quoteOrigin = segment;
+                this.started = true;
+                continue;
             }
+            if (char === " " || char === "\t") {
+                if (this.started) {
+                    this.words.push(this.word);
+                    this.word = "";
+                    this.started = false;
+                }
+                continue;
+            }
+            if (char === "$" || char === "%") {
+                const expansion = segment.slice(i).match(EXPANSION);
+                if (expansion !== null) {
+                    fail(`refusing to run ${JSON.stringify(segment)}: the command text carries the shell expansion ` +
+                        `${JSON.stringify(expansion[0])}, which no shell performs here; pass the value as an interpolation instead`);
+                }
+            }
+            if (char === "\n" || char === "\r" || SHELL_SYNTAX.test(char)) {
+                fail(`refusing to run ${JSON.stringify(segment)}: the command text carries ${JSON.stringify(char)}, ` +
+                    `which only a shell could interpret and the shell facade runs no shell; ` +
+                    `pass the value as an interpolation instead`);
+            }
+            if (!this.started && WORD_START_SYNTAX.test(char)) {
+                fail(`refusing to run ${JSON.stringify(segment)}: the command text starts a word with ${JSON.stringify(char)}, ` +
+                    `which only a shell could interpret and the shell facade runs no shell; ` +
+                    `pass the value as an interpolation instead`);
+            }
+            this.word += char;
+            this.started = true;
         }
-        if (char === "\n" || char === "\r" || SHELL_SYNTAX.test(char)) {
-            fail(`refusing to run ${JSON.stringify(segment)}: the command text carries ${JSON.stringify(char)}, ` +
-                `which only a shell could interpret and the shell facade runs no shell; ` +
-                `pass the value as an interpolation instead`);
-        }
-        if (!started && WORD_START_SYNTAX.test(char)) {
-            fail(`refusing to run ${JSON.stringify(segment)}: the command text starts a word with ${JSON.stringify(char)}, ` +
-                `which only a shell could interpret and the shell facade runs no shell; ` +
-                `pass the value as an interpolation instead`);
-        }
-        word += char;
-        started = true;
     }
-    if (quote !== undefined) {
-        fail(`refusing to run ${JSON.stringify(segment)}: the command text ends inside an unterminated ${quote} quote`);
+    /** Append one interpolated value as opaque argv data — never scanned, never split. */
+    value(raw) {
+        this.word += typeof raw === "string" ? raw : String(raw);
+        this.started = true;
     }
-    if (started)
-        words.push(word);
-    return words;
+    /** Close the command: a quote left open is refused, and an empty argv has nothing to exec. */
+    finish() {
+        if (this.quote !== undefined) {
+            fail(`refusing to run ${JSON.stringify(this.quoteOrigin)}: the command text ends inside an ` +
+                `unterminated ${this.quote} quote`);
+        }
+        if (this.started)
+            this.words.push(this.word);
+        if (this.words.length === 0)
+            fail("refusing to run an empty command");
+        return this.words;
+    }
 }
 /**
  * Compose the argv the OS will exec: the literal text becomes words, and each
- * interpolated value becomes exactly one element — never re-split, never
+ * interpolated value is appended as opaque data — never re-split, never
  * re-quoted, never parsed.
  */
 function compose(strings, values) {
-    const argv = [];
+    const argv = new ArgvBuilder();
     for (let i = 0; i < strings.length; i += 1) {
-        argv.push(...splitWords(strings[i] ?? ""));
-        if (i < values.length) {
-            const value = values[i];
-            argv.push(typeof value === "string" ? value : String(value));
-        }
+        argv.literal(strings[i] ?? "");
+        if (i < values.length)
+            argv.value(values[i]);
     }
-    if (argv.length === 0)
-        fail("refusing to run an empty command");
-    return argv;
+    return argv.finish();
 }
 function makeShellPromise(argv, state) {
     // Human-readable form for failure messages only; execution never uses it.

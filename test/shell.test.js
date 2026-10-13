@@ -29,6 +29,39 @@ test("shell: interpolation is quoted as a single argument", async () => {
   assert.equal(result.stdout, value)
 })
 
+/* ---- segment continuity: one template is one command line ---- */
+
+/**
+ * A shell collapses a whole tagged template into ONE command line, so word and
+ * quote state spans the interpolations. The facade scanned each literal segment
+ * on its own, so `pre${x}post` reached the child as THREE arguments, and a
+ * quoted interpolation (`"${x}"`) died on an unterminated quote that the author
+ * never wrote. Both cases model that failing state.
+ */
+test("shell: an interpolation continues the word the literal text opened", async () => {
+  const $ = createShell()
+  const result = await $`node -e "process.stdout.write(JSON.stringify(process.argv.slice(1)))" pre${"VALUE"}post`.quiet()
+  assert.equal(result.stdout, '["preVALUEpost"]', "literal-value-literal is ONE argument, not three")
+})
+
+test("shell: a quoted interpolation groups the value, it never opens a quote", async () => {
+  const $ = createShell()
+  const grouped = await $`node -e "process.stdout.write(JSON.stringify(process.argv.slice(1)))" "${"a b"}"`.quiet()
+  assert.equal(grouped.stdout, '["a b"]', "the literal quotes around an interpolation group it into one argument")
+  // The grouping is the literal text's, never the value's: quoting an
+  // interpolation must not hand its payload back to a parser.
+  const payload = 'x" & echo BIFROST_INJECTED'
+  const injected = await $`node -e "process.stdout.write(JSON.stringify(process.argv.slice(1)))" "${payload}"`.quiet()
+  assert.equal(injected.stdout, JSON.stringify([payload]), "a quoted interpolation is still data")
+  assert.equal(injected.exitCode, 0)
+})
+
+test("shell: a quote the literal text leaves open is still refused", () => {
+  const $ = createShell()
+  assert.throws(() => $`echo "open`, /unterminated/)
+  assert.throws(() => $`echo 'open`, /unterminated/)
+})
+
 /* ---- shell-string removal: an interpolated value is argv data, never syntax ---- */
 
 /**

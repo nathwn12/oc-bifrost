@@ -23,7 +23,7 @@ package itself — there is no separate `npm i` step:
     {
       "package": "@nathwn12/oc-bifrost@1.6.4",
       "options": {
-        "plugins": ["<exactly one specifier — one of the three paths below>"],
+        "plugins": ["<exactly one specifier — one of the four paths below>"],
         "strict": false,
         "verbose": true
       }
@@ -60,7 +60,7 @@ Both routes load the same bridge. Pick one per config entry:
       {
         "package": "@nathwn12/oc-bifrost@1.6.4",
         "options": {
-          "plugins": ["<exactly one specifier - one of the three paths below>"],
+          "plugins": ["<exactly one specifier - one of the four paths below>"],
           "strict": false,
           "verbose": true
         }
@@ -115,16 +115,17 @@ Both routes load the same bridge. Pick one per config entry:
   `NpmInstallFailedError (cause: Error: An unknown git error occurred)`. Same for the
   `#` and `#index.ts` variants. Do not use it.
 
-## 2. Mount the legacy plugin — one of three paths
+## 2. Mount the legacy plugin — one of four paths
 
 | # | Path | Use when |
 |---|---|---|
 | 1 | `github:` (advertised / default) | the plugin's source lives in a GitHub repo — online fetch |
 | 2 | `preset:rtk` (offline fallback, optional) | no network — GitHub unreachable, or an air-gapped host |
 | 3 | local file (fallback) | the plugin is a file on disk |
+| 4 | registry package | the plugin is published on the npm registry (bare name, or `npm:` / `pnpm:` / `bun:`) |
 
-Pick exactly one per plugin. Npm/bare package specifiers are not supported yet — the bridge refuses
-them out loud.
+Pick exactly one per plugin. Anything outside those four forms is refused out loud with the
+accepted-forms message — the bridge never guesses which source you meant.
 
 ### Path 1 — `github:` (advertised / default, online)
 
@@ -214,6 +215,35 @@ directory (see step 3).
   — e.g. `C:/Users/you/.config/opencode/legacy/rtk.ts`, or `/home/you/.config/opencode/legacy/rtk.ts`
   on macOS/Linux.
 
+### Path 4 — registry package (bare name, or `npm:` / `pnpm:` / `bun:`)
+
+`"plugins": ["oc-todo"]`, `"plugins": ["oc-todo@0.4.0"]`, `"plugins": ["@scope/pkg@^1.0.0"]`,
+`"plugins": ["pkg@latest"]` — a bare registry specifier; or the same behind an `npm:` / `pnpm:` /
+`bun:` prefix, which is stripped before the bare spec is parsed and validated.
+
+- **The host does not cover this, so the bridge installs the package itself.** The host installer
+  drops `npm:` alias specs and ships no pnpm/bun installer. The bridge spawns a manager -
+  `bun add --exact <bare>` first (the host runs on bun), `npm install --no-save --legacy-peer-deps
+  <bare>` as the fallback - through the current JS runtime with an argv array and no shell.
+- **A cold install needs network; the warm cache needs none.** The installed tree lands in a
+  bifrost-owned cache at `$XDG_CACHE_HOME/opencode/oc-bifrost/registry/<id>/` (default
+  `~/.cache/opencode/oc-bifrost/registry/<id>/`) beside a `meta.json` provenance record. A warm
+  entry whose record matches the requested spec loads with zero spawns and no network; when the
+  record names a different spec, the load refuses loudly.
+- **The entry is the package's own declaration** - `exports` / `module` / `main` read from the
+  installed `package.json` - and it must exist before import, or the mount fails loudly and nothing
+  is mounted. The specifier is refused before anything is spawned if it carries control characters
+  or shell metacharacters.
+- **It mounts whatever it resolves to:** a V1 package bridges hook by hook, a V2 definition runs its
+  native `setup` - the same shape-based routing as every other path.
+- **`pnpm:` and `bun:` are aliases**, not real pnpm/bun installs: they install through the same
+  spawned manager, and the mount note says so plainly rather than implying otherwise.
+- The mount note names the installed version, the requested spec, the entry, and the manager that
+  performed the install, and always ends with the host-rights line.
+
+> **Version gate.** Registry specifiers require **oc-bifrost 1.6.0 or later**; releases **1.5.x and
+> below** refuse them. On those, use path 1, 2, or 3.
+
 ## 3. Park the legacy plugins correctly
 
 **A V1 plugin left in `.opencode/plugins/` is hard-rejected by V2 before the bridge can see it:**
@@ -225,7 +255,8 @@ Plugin must export a default definition with an id and an effect or setup functi
 Move it out of discovery — `legacy/` is the convention — and reference it from `options.plugins`:
 
 - relative specifiers resolve against the **session directory** (project-local only)
-- absolute paths work everywhere; npm/bare names are refused (not supported yet)
+- absolute paths work everywhere; a bare name (or an `npm:` / `pnpm:` / `bun:` specifier) is not a
+  file - it is a registry mount, path 4 above
 - the bridge warns at load when it finds a stranded V1 file in a discovery directory
 
 ### Global install (all projects)
@@ -274,7 +305,7 @@ no state to the project.
 
 ## 6. Report to the human
 
-State: path used (1, 2, or 3) · config path touched · legacy plugin path · hooks mounted and their levels · the side effect you verified · anything `unsupported` the plugin depends on. If a hook the plugin needs is `unsupported`, say so plainly and do not claim success.
+State: path used (1, 2, 3, or 4) · config path touched · legacy plugin path · hooks mounted and their levels · the side effect you verified · anything `unsupported` the plugin depends on. If a hook the plugin needs is `unsupported`, say so plainly and do not claim success.
 
 ---
 

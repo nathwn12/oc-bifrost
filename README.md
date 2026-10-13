@@ -72,7 +72,7 @@ npm run check      # typecheck + build + tests
 - [PROOF.md](PROOF.md) — the verification record behind every claim above.
 - [VERIFIED-PLUGINS.md](VERIFIED-PLUGINS.md) — plugins smoke-tested against oc-bifrost on OpenCode V2, with the route each row exercised.
 - [CONTRIBUTING.md](CONTRIBUTING.md) — how to add hook coverage or a verified plugin; both doors are gated on proof.
-- [src/compat-matrix.ts](src/compat-matrix.ts) — the single source of truth for the compatibility matrix; every row names the test that proves it.
+- [src/compat-matrix.ts](https://github.com/nathwn12/oc-bifrost/blob/main/src/compat-matrix.ts) — the single source of truth for the compatibility matrix; every row names the test that proves it (the published package ships the built `dist/compat-matrix.js`).
 
 ## Status
 

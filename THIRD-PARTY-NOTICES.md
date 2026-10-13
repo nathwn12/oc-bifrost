@@ -22,8 +22,10 @@ ships only the plugin shim; the preset checks for the binary and tells you how t
 ### Telemetry
 
 Upstream RTK ships telemetry that is **opt-out**. See upstream's `DISCLAIMER.md` and README for how
-to disable it. `oc-bifrost` itself collects no telemetry. The only outbound requests it can make are
-user-enabled and documented: the opt-in freshness check and the `github:` remote fetch.
+to disable it. `oc-bifrost` itself collects no telemetry. Every outbound request it can make is
+user-enabled and documented: the opt-in freshness check, the `github:` remote fetch, and the registry
+install a bare name or `npm:`/`pnpm:`/`bun:` specifier asks for — that one runs your own `bun`/`npm`
+and downloads from the registry you have configured.
 
 ### Affiliations
 

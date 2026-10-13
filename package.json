@@ -29,6 +29,7 @@
   "files": [
     "dist",
     "vendor",
+    "assets",
     "README.md",
     "LICENSE",
     "THIRD-PARTY-NOTICES.md",

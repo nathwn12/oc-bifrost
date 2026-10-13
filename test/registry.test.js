@@ -39,6 +39,15 @@ function tmpRoot() {
 }
 
 /**
+ * A record written by a Windows host spells its separators with a backslash.
+ * Built from its code point rather than written out literally, so this file
+ * carries no backslash path shape for the outward-content gate to read as a
+ * private UNC path.
+ */
+const WINDOWS_SEP = String.fromCharCode(92)
+const windowsSeparated = (...parts) => parts.join(WINDOWS_SEP)
+
+/**
  * A fake spawned installer: materializes `node_modules/<name>/` with the
  * given manifest fields and entry file, and returns the canned label. Counts
  * its own invocations so tests prove the warm path spawns nothing.
@@ -215,7 +224,90 @@ test("resolveRegistryPlugin: the installed entry resolves via the package's own 
       install: fake.install,
     })
     assert.match(result.url, /dist\/entry\.mjs$/, "exports must win over main")
-    assert.equal(result.meta.entry, path.join("dist", "entry.mjs"))
+    assert.equal(result.meta.entry, "dist/entry.mjs", "the stored entry is posix-separated on every platform, never a backslash")
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true })
+  }
+})
+
+test("resolveRegistryPlugin: a nested entry survives the cold -> warm round trip", async () => {
+  // Regression (1.6.5): the cold path stored `path.relative` verbatim, so on
+  // Windows the record held `dist\entry.mjs` - and the warm path refused the
+  // backslash, so a package that mounted on a cold install failed the very next
+  // start. Both halves are asserted here: the record is portable, and the warm
+  // load resolves the nested entry from it.
+  const root = tmpRoot()
+  try {
+    const spec = parseRegistrySpecifier("oc-todo@0.4.0")
+    const fake = fakeInstall({
+      name: "oc-todo",
+      entry: "dist/entry.mjs",
+      manifest: { exports: { ".": "./dist/entry.mjs" } },
+    })
+    const cold = await resolveRegistryPlugin(spec, { cacheRoot: root, install: fake.install, now: () => new Date(0) })
+    assert.equal(cold.fetched, true)
+    const record = JSON.parse(fs.readFileSync(path.join(cold.cacheDir, "meta.json"), "utf8"))
+    assert.equal(record.entry, "dist/entry.mjs")
+
+    const warm = await resolveRegistryPlugin(spec, {
+      cacheRoot: root,
+      install: async () => {
+        throw new Error("must never install on a warm cache")
+      },
+    })
+    assert.equal(warm.fetched, false, "the second resolve must be a cache hit")
+    assert.equal(warm.url, cold.url)
+    assert.match(warm.url, /dist\/entry\.mjs$/)
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true })
+  }
+})
+
+test("resolveRegistryPlugin: a record holding a Windows-separated entry still loads", async () => {
+  // The pre-fix layout on a Windows host. Normalizing the separators before the
+  // shape check heals the cache; refusing it would force a re-install of bytes
+  // that are already verified.
+  const root = tmpRoot()
+  try {
+    const spec = parseRegistrySpecifier("oc-todo@0.4.0")
+    const fake = fakeInstall({
+      name: "oc-todo",
+      entry: "dist/entry.mjs",
+      manifest: { exports: { ".": "./dist/entry.mjs" } },
+    })
+    const cold = await resolveRegistryPlugin(spec, { cacheRoot: root, install: fake.install })
+    const metaPath = path.join(cold.cacheDir, "meta.json")
+    fs.writeFileSync(metaPath, JSON.stringify({ ...JSON.parse(fs.readFileSync(metaPath, "utf8")), entry: windowsSeparated("dist", "entry.mjs") }))
+
+    const warm = await resolveRegistryPlugin(spec, {
+      cacheRoot: root,
+      install: async () => {
+        throw new Error("must never install on a warm cache")
+      },
+    })
+    assert.equal(warm.fetched, false)
+    assert.match(warm.url, /dist\/entry\.mjs$/, "the Windows-separated record must resolve to the same entry file")
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true })
+  }
+})
+
+test("resolveRegistryPlugin: a traversal entry is still refused after normalization", async () => {
+  // The separator normalization must not open a hole: a record that points out
+  // of the installed package is refused on BOTH separator spellings.
+  const root = tmpRoot()
+  try {
+    const spec = parseRegistrySpecifier("oc-todo@0.4.0")
+    const fake = fakeInstall({ name: "oc-todo" })
+    const cold = await resolveRegistryPlugin(spec, { cacheRoot: root, install: fake.install })
+    const metaPath = path.join(cold.cacheDir, "meta.json")
+    for (const entry of ["../../escape.mjs", windowsSeparated("..", "..", "escape.mjs"), windowsSeparated("C:", "escape.mjs")]) {
+      fs.writeFileSync(metaPath, JSON.stringify({ ...JSON.parse(fs.readFileSync(metaPath, "utf8")), entry }))
+      await assert.rejects(
+        resolveRegistryPlugin(spec, { cacheRoot: root, install: async () => { throw new Error("must never install on a warm cache") } }),
+        /refusing to load/,
+      )
+    }
   } finally {
     fs.rmSync(root, { recursive: true, force: true })
   }

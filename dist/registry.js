@@ -260,6 +260,17 @@ function readProvenance(cacheDir) {
     }
     return parsed;
 }
+/**
+ * The stored entry is POSIX-separated, portably. `path.relative` returns the
+ * platform separator, so a Windows cold install persisted `dist\entry.mjs` —
+ * which the warm path then refused, bricking a cache that had just worked. A
+ * backslash in a record is therefore a separator (the pre-fix Windows layout),
+ * never a filename byte; normalizing it first also heals an existing cache
+ * instead of making the user delete it.
+ */
+function normalizeStoredEntry(relative) {
+    return relative.replace(/\\/g, "/");
+}
 /** A stored relative entry must never be trusted straight into `path.join`. */
 function assertSafeRelativePath(relative) {
     if (relative === "" || relative.startsWith("/") || relative.includes("\\") || relative.includes("\0")) {
@@ -408,9 +419,12 @@ export async function resolveRegistryPlugin(spec, opts) {
             fail(`refusing to load the cached copy at ${safe(cacheDir)}: it records "${safe(warm.bare)}", not "${safe(spec.bare)}". ` +
                 `A cached artifact is never silently replaced; delete the cache directory to re-install`);
         }
-        assertSafeRelativePath(warm.entry);
+        // Separators are normalized BEFORE the shape check, so a record written by
+        // a Windows cold install (backslash separators) loads instead of refusing.
+        const entry = normalizeStoredEntry(warm.entry);
+        assertSafeRelativePath(entry);
         const packageDir = path.join(cacheDir, "node_modules", ...warm.name.split("/"));
-        const entryFile = path.resolve(packageDir, warm.entry);
+        const entryFile = path.resolve(packageDir, entry);
         if (path.relative(packageDir, entryFile) === "" || path.relative(packageDir, entryFile).startsWith("..")) {
             fail(`refusing to load: the recorded entry path (${safe(warm.entry)}) escapes the installed package; delete the cache directory to re-install`);
         }
@@ -458,7 +472,7 @@ export async function resolveRegistryPlugin(spec, opts) {
         name: spec.name,
         range: spec.range ?? "",
         version,
-        entry: path.relative(packageDir, entryFile),
+        entry: normalizeStoredEntry(path.relative(packageDir, entryFile)),
         installedBy: installedBy,
         fetchedAt: (opts.now ?? (() => new Date()))().toISOString(),
     };

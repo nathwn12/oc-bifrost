@@ -6,6 +6,18 @@
  * V1 plugins use — tagged template, `.quiet()`, `.nothrow()`, `.text()`,
  * `.json()`, `.cwd()`, `.env()` — and delegates to Bun's `$` verbatim when the
  * host already provides it.
+ *
+ * SECURITY — no command is ever a shell string. The tagged template is
+ * composed into an ARGV array and spawned directly (`shell: false`): the
+ * literal text is split into words with `'`/`"` grouping honoured, and every
+ * interpolated value becomes exactly ONE argv element — data the OS hands to
+ * the program, never syntax a shell re-parses. The earlier defect composed a
+ * command string and spawned it with `shell: true`: an interpolated value such
+ * as `x" & echo INJECTED` ended the quoting and `cmd.exe` ran the second
+ * command as the user. Because no shell remains, syntax only a shell could
+ * honour (pipe, redirect, sequencing, grouping, substitution, expansion,
+ * globbing) is REFUSED by name at composition time instead of being silently
+ * reinterpreted; a refusal is a feature (`test/shell.test.js`).
  */
 import { spawn } from "node:child_process"
 
@@ -28,29 +40,122 @@ export interface ShellPromise extends PromiseLike<ShellResult> {
   json<T = unknown>(): Promise<T>
 }
 
-const QUOTE = (value: unknown): string => {
-  const text = typeof value === "string" ? value : String(value)
-  // Windows cmd and POSIX sh both accept double quotes for a single argument.
-  return `"${text.replace(/\\/g, "\\\\").replace(/"/g, '\\"')}"`
+/** Every refusal in this file carries the package prefix, like the rest of src/. */
+function fail(message: string): never {
+  throw new Error(`[oc-bifrost] ${message}`)
 }
 
-function compose(strings: readonly string[], values: readonly unknown[]): string {
-  let command = ""
-  for (let i = 0; i < strings.length; i += 1) {
-    command += strings[i] ?? ""
-    if (i < values.length) command += QUOTE(values[i])
+/**
+ * Structure a shell would have acted on: pipe, sequencing, redirect, grouping,
+ * globbing, command substitution or cmd's `^` escape. Refused when unquoted —
+ * every one of these meant something else while a shell sat behind the facade.
+ */
+const SHELL_SYNTAX = /[|&;<>(){}[\]*?^`]/
+
+/** Word-start characters a shell would have acted on: tilde expansion, comment. */
+const WORD_START_SYNTAX = /[~#]/
+
+/**
+ * An expansion a shell would have performed: `$NAME`, `${NAME}`, `$1`, `$(cmd)`,
+ * `%NAME%`. Matched at the character, so a lone `$` or `%` stays literal data.
+ */
+const EXPANSION = /^\$\{[A-Za-z_][A-Za-z0-9_]*\}|^\$\(|^\$[A-Za-z_0-9][A-Za-z0-9_]*|^%[A-Za-z_][^%]*%/
+
+/**
+ * Split one literal template segment into argv words.
+ *
+ * `'` and `"` group a word — the grouping a shell performs — so a caller that
+ * already quoted a literal argument keeps working. Everything else is taken
+ * literally, and any character that only a shell could have interpreted is
+ * refused by name: with no shell behind it, such text can no longer mean what
+ * it meant, and passing it through as data would be a silent lie.
+ */
+function splitWords(segment: string): string[] {
+  const words: string[] = []
+  let word = ""
+  let started = false
+  let quote: '"' | "'" | undefined
+  for (let i = 0; i < segment.length; i += 1) {
+    const char = segment[i] as string
+    if (quote !== undefined) {
+      if (char === quote) quote = undefined
+      else word += char
+      started = true
+      continue
+    }
+    if (char === '"' || char === "'") {
+      quote = char
+      started = true
+      continue
+    }
+    if (char === " " || char === "\t") {
+      if (started) {
+        words.push(word)
+        word = ""
+        started = false
+      }
+      continue
+    }
+    if (char === "$" || char === "%") {
+      const expansion = segment.slice(i).match(EXPANSION)
+      if (expansion !== null) {
+        fail(
+          `refusing to run ${JSON.stringify(segment)}: the command text carries the shell expansion ` +
+          `${JSON.stringify(expansion[0])}, which no shell performs here; pass the value as an interpolation instead`,
+        )
+      }
+    }
+    if (char === "\n" || char === "\r" || SHELL_SYNTAX.test(char)) {
+      fail(
+        `refusing to run ${JSON.stringify(segment)}: the command text carries ${JSON.stringify(char)}, ` +
+        `which only a shell could interpret and the shell facade runs no shell; ` +
+        `pass the value as an interpolation instead`,
+      )
+    }
+    if (!started && WORD_START_SYNTAX.test(char)) {
+      fail(
+        `refusing to run ${JSON.stringify(segment)}: the command text starts a word with ${JSON.stringify(char)}, ` +
+        `which only a shell could interpret and the shell facade runs no shell; ` +
+        `pass the value as an interpolation instead`,
+      )
+    }
+    word += char
+    started = true
   }
-  return command
+  if (quote !== undefined) {
+    fail(`refusing to run ${JSON.stringify(segment)}: the command text ends inside an unterminated ${quote} quote`)
+  }
+  if (started) words.push(word)
+  return words
+}
+
+/**
+ * Compose the argv the OS will exec: the literal text becomes words, and each
+ * interpolated value becomes exactly one element — never re-split, never
+ * re-quoted, never parsed.
+ */
+function compose(strings: readonly string[], values: readonly unknown[]): string[] {
+  const argv: string[] = []
+  for (let i = 0; i < strings.length; i += 1) {
+    argv.push(...splitWords(strings[i] ?? ""))
+    if (i < values.length) {
+      const value = values[i]
+      argv.push(typeof value === "string" ? value : String(value))
+    }
+  }
+  if (argv.length === 0) fail("refusing to run an empty command")
+  return argv
 }
 
 function makeShellPromise(
-  command: string,
+  argv: readonly string[],
   state: { quiet: boolean; nothrow: boolean; cwd?: string; env?: Record<string, string | undefined> },
 ): ShellPromise {
+  // Human-readable form for failure messages only; execution never uses it.
+  const command = argv.join(" ")
   const execute = (): Promise<ShellResult> =>
     new Promise((resolve, reject) => {
-      const child = spawn(command, {
-        shell: true,
+      const child = spawn(argv[0] as string, argv.slice(1), {
         cwd: state.cwd,
         env: { ...process.env, ...(state.env ?? {}) },
         windowsHide: true,
@@ -66,7 +171,21 @@ function makeShellPromise(
         stderr += String(chunk)
         if (!state.quiet) process.stderr.write(String(chunk))
       })
-      child.on("error", reject)
+      child.on("error", (error) => {
+        // Windows cannot exec a `.cmd`/`.bat` launcher without a shell, and
+        // this facade never crosses a shell boundary: name the reason and the
+        // way out instead of a bare EINVAL.
+        if ((error as NodeJS.ErrnoException).code === "EINVAL" && process.platform === "win32") {
+          reject(
+            new Error(
+              `[oc-bifrost] cannot run ${JSON.stringify(argv[0])}: on Windows a \`.cmd\`/\`.bat\` launcher ` +
+              `(npm, npx, yarn) needs a shell, and the shell facade runs none. Run the program's own JS entry instead.`,
+            ),
+          )
+          return
+        }
+        reject(error)
+      })
       child.on("close", (code) => {
         const exitCode = code ?? 0
         if (exitCode !== 0 && !state.nothrow) {
@@ -79,17 +198,21 @@ function makeShellPromise(
 
   const promise: ShellPromise = {
     then: (onFulfilled, onRejected) => execute().then(onFulfilled, onRejected),
-    quiet: () => makeShellPromise(command, { ...state, quiet: true }),
-    nothrow: () => makeShellPromise(command, { ...state, nothrow: true }),
-    cwd: (dir: string) => makeShellPromise(command, { ...state, cwd: dir }),
-    env: (vars) => makeShellPromise(command, { ...state, env: { ...state.env, ...vars } }),
+    quiet: () => makeShellPromise(argv, { ...state, quiet: true }),
+    nothrow: () => makeShellPromise(argv, { ...state, nothrow: true }),
+    cwd: (dir: string) => makeShellPromise(argv, { ...state, cwd: dir }),
+    env: (vars) => makeShellPromise(argv, { ...state, env: { ...state.env, ...vars } }),
     text: () => execute().then((result) => result.stdout.trim()),
     json: <T,>() => execute().then((result) => JSON.parse(result.stdout) as T),
   }
   return promise
 }
 
-/** True when the host is Bun and already exposes a real `$`. */
+/**
+ * True when the host is Bun and already exposes a real `$` — that shell is
+ * Bun's own implementation, with its own interpolation rules, and is used
+ * verbatim rather than reimplemented here.
+ */
 export function hostShell(): Shell | undefined {
   const bun = (globalThis as { Bun?: { $?: unknown } }).Bun
   return bun && typeof bun.$ === "function" ? (bun.$ as Shell) : undefined

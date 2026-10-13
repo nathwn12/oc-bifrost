@@ -35,4 +35,4 @@ body:
     attributes:
       label: Already checked the matrix?
       options:
-        - label: I checked README.md and the hooks it needs are not yet bridged.
+        - label: I checked README.md and the hooks it needs are not bridged.

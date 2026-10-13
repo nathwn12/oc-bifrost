@@ -381,11 +381,13 @@ function npmCliEntry(): string | undefined {
  */
 export function defaultRegistryInstall(dir: string, bare: string): string {
   fs.mkdirSync(dir, { recursive: true })
-  const stub = path.join(dir, "package.json")
+  // Seed manifest: a package manager only treats `dir` as a package root when
+  // a package.json is present, so the cache directory carries one.
+  const manifestPath = path.join(dir, "package.json")
   try {
-    fs.lstatSync(stub)
+    fs.lstatSync(manifestPath)
   } catch {
-    fs.writeFileSync(stub, JSON.stringify({ name: "oc-bifrost-registry-cache", private: true }, null, 2))
+    fs.writeFileSync(manifestPath, JSON.stringify({ name: "oc-bifrost-registry-cache", private: true }, null, 2))
   }
   const attempts: Array<{ label: string; command: string; args: string[] }> = [
     { label: "bun (`bun add --exact`)", command: "bun", args: ["add", "--exact", bare] },

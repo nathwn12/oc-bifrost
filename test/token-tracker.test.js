@@ -12,7 +12,7 @@ import { createReporter } from "../dist/report.js"
 /**
  * The live dogfood plugin: eserete/opencode-token-tracker, mounted from the
  * bridge's GitHub cache. The suite exercises the real file when the cache tree
- * is present and skips elsewhere; nothing is stubbed about the plugin itself.
+ * is present and skips elsewhere; the plugin itself is never mocked.
  */
 const trackerPath = path.join(
   os.homedir(),

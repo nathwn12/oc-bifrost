@@ -46,7 +46,7 @@ One OpenCode V2 plugin (`src/index.ts`) that imports plugin modules of any era a
 ## Dev loop
 
 ```sh
-npm run check     # typecheck + build + tests
+npm run check     # typecheck + compile + tests
 ```
 
 ## Workflow standard (owner directive, 2026-09-30)

@@ -63,7 +63,7 @@ On load the bridge prints a per-plugin mount report naming every hook that bridg
 Prerequisites: Node 22 or later, npm.
 ```sh
 npm install
-npm run check      # typecheck + build + tests
+npm run check      # typecheck + compile + tests
 ```
 
 ## Docs

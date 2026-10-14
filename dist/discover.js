@@ -1,9 +1,20 @@
-function isV2(value) {
+export function effectOnlyRefusal(id, spec) {
+    return (`effect-only V2 definition "${id}" ("${spec}") uses the Effect-native "effect" entry (no "setup") — ` +
+        `mount it directly by the host, not through the bridge; see https://opencode.ai/v2/docs/build/plugins/effect/#effect`);
+}
+function isEffectOnly(value) {
     if (!value || typeof value !== "object")
         return false;
     const candidate = value;
     return (typeof candidate.id === "string" &&
-        (typeof candidate.setup === "function" || typeof candidate.effect === "function"));
+        typeof candidate.effect === "function" &&
+        typeof candidate.setup !== "function");
+}
+function isV2(value) {
+    if (!value || typeof value !== "object")
+        return false;
+    const candidate = value;
+    return typeof candidate.id === "string" && typeof candidate.setup === "function";
 }
 function isFactory(value) {
     return typeof value === "function";
@@ -13,6 +24,9 @@ export function discover(module, spec) {
     const fallbackId = spec.split(/[\\/]/).pop()?.replace(/\.(ts|js|mjs|cjs)$/, "") ?? "plugin";
     if (isV2(module.default)) {
         return { kind: "v2", id: module.default.id, definition: module.default, note: "native V2 definition" };
+    }
+    if (isEffectOnly(module.default)) {
+        return { kind: "unknown", reason: effectOnlyRefusal(module.default.id, spec) };
     }
     // V1 module shape: { id?, server: Plugin }.
     if (typeof module.server === "function") {

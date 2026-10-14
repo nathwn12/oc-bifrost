@@ -5,7 +5,7 @@ Plugins smoke-tested against `oc-bifrost` on OpenCode V2. "Verified" means a run
 There are **two mounting routes**, and a row says which one it exercised:
 
 - **V1 hook translation** — a V1 factory/module; its hooks are bridged per the compatibility matrix.
-- **V2 pass-through** — an `export default` `{ id, setup | effect }`; it is mounted as-is with the host context. A **dual-export** file (V1 named export + V2 default) takes this route for its V2 default; the V1 named export is left untouched.
+- **V2 pass-through** — an `export default` `{ id, setup }` (an Effect-only `{ id, effect }` is refused out loud for direct host mounting); it is mounted as-is with the host context. A **dual-export** file (V1 named export + V2 default) takes this route for its V2 default; the V1 named export is left untouched.
 
 | Plugin | Hooks used | Matrix level | OpenCode | Result | By |
 |---|---|---|---|---|---|

@@ -88,3 +88,16 @@ test("discover: unknown module is reported, never guessed", () => {
   const result = discover({ somethingElse: 1 }, "nope.ts")
   assert.equal(result.kind, "unknown")
 })
+
+test("discover: effect-only V2 definition is refused, not classified as mountable V2", () => {
+  const result = discover({ default: { id: "fx", effect: () => {} } }, "fx.ts")
+  assert.equal(result.kind, "unknown")
+  assert.match(result.reason, /Effect-native/)
+  assert.match(result.reason, /directly by the host/)
+})
+
+test("discover: a V2 definition with both setup and effect still mounts via setup", () => {
+  const result = discover({ default: { id: "both", setup: () => {}, effect: () => {} } }, "both.ts")
+  assert.equal(result.kind, "v2")
+  assert.equal(result.id, "both")
+})

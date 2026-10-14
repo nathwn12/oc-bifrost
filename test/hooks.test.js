@@ -990,3 +990,104 @@ test("bridge: autocontinue is refused out loud", async () => {
 test("bridge: text.complete is refused out loud", async () => {
   await assertRefused("experimental.text.complete")
 })
+
+test("bridge: chat.params fans out to every model-request kind", async () => {
+  // A transformation meant for every request must register for each kind -
+  // context alone silently misses generate and title.
+  const { ctx, registered, fire } = fakeContext()
+  let calls = 0
+  await registerV1Hooks(
+    ctx,
+    {
+      "chat.params": async (_input, output) => {
+        calls++
+        output.temperature = 0.2
+      },
+    },
+    createReporter("params", {}),
+  )
+  for (const kind of ["context", "compaction", "generate", "title"]) {
+    assert.equal((registered.get(`session:${kind}`) ?? []).length, 1, `${kind} must carry the chat.params transform`)
+  }
+  // A title-shaped event (SessionTitle carries no agent/tools) still transforms.
+  const titleEvent = { sessionID: "s", model: { id: "m" }, system: [], messages: [], options: {} }
+  await fire("session:title", titleEvent)
+  assert.equal(calls, 1)
+  assert.equal(titleEvent.options.temperature, 0.2)
+  const genEvent = { sessionID: "s", agent: "build", model: { id: "m" }, system: [], messages: [], options: {}, tools: {} }
+  await fire("session:generate", genEvent)
+  assert.equal(calls, 2)
+  assert.equal(genEvent.options.temperature, 0.2)
+})
+
+test("bridge: messages and system transforms fan out to every model-request kind", async () => {
+  const { ctx, registered, fire } = fakeContext()
+  const order = []
+  await registerV1Hooks(
+    ctx,
+    {
+      "experimental.chat.messages.transform": async (_input, output) => {
+        order.push("messages")
+        output.messages.push({ info: { role: "user" }, parts: [{ type: "text", text: "appended" }] })
+      },
+      "experimental.chat.system.transform": async (_input, output) => {
+        order.push("system")
+        output.system.push("appended")
+      },
+    },
+    createReporter("fanout", {}),
+  )
+  for (const kind of ["context", "compaction", "generate", "title"]) {
+    assert.equal((registered.get(`session:${kind}`) ?? []).length, 2, `${kind} must carry both transforms`)
+  }
+  // A title-shaped event has no agent: the messages pre-fill must tolerate it.
+  const event = {
+    sessionID: "s",
+    model: { id: "m" },
+    system: [{ type: "text", text: "base" }],
+    messages: [{ role: "user", id: "m1", content: [{ type: "text", text: "hi" }] }],
+  }
+  await fire("session:title", event)
+  assert.deepEqual(order, ["messages", "system"], "messages.transform still runs before system.transform on every kind")
+  assert.deepEqual(event.system.at(-1), { type: "text", text: "appended" })
+  assert.equal(event.messages.length, 2)
+  assert.deepEqual(event.messages[1], { role: "user", content: [{ type: "text", text: "appended" }] })
+})
+
+test("bridge: a repeated delivery of the same request event applies each transform once", async () => {
+  // V2 runs exactly one session hook per request (each flow runs its own -
+  // packages/core/src/session/model-request.ts:220-228, 420-428), so the
+  // per-hook WeakSet is defence in depth: the same event object re-delivered
+  // on another kind must not apply the transform twice.
+  const { ctx, fire } = fakeContext()
+  let paramsCalls = 0
+  let messagesCalls = 0
+  await registerV1Hooks(
+    ctx,
+    {
+      "chat.params": async (_input, output) => {
+        paramsCalls++
+        output.temperature = 0.2
+      },
+      "experimental.chat.messages.transform": async () => {
+        messagesCalls++
+      },
+      "experimental.chat.system.transform": async (_input, output) => {
+        output.system.push("marker")
+      },
+    },
+    createReporter("dedup", {}),
+  )
+  const event = { sessionID: "s", model: { id: "m" }, system: [], messages: [], options: {} }
+  await fire("session:context", event)
+  await fire("session:generate", event)
+  assert.equal(paramsCalls, 1, "chat.params must run once per event object")
+  assert.equal(messagesCalls, 1, "messages.transform must run once per event object")
+  assert.deepEqual(event.system, [{ type: "text", text: "marker" }], "the system marker must land exactly once")
+  // A distinct request is still transformed: the guard is per-event, not global.
+  const other = { sessionID: "s", model: { id: "m" }, system: [], messages: [], options: {} }
+  await fire("session:title", other)
+  assert.equal(paramsCalls, 2)
+  assert.equal(messagesCalls, 2)
+  assert.deepEqual(other.system, [{ type: "text", text: "marker" }])
+})

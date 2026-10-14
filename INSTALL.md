@@ -234,8 +234,8 @@ directory (see step 3).
   installed `package.json` - and it must exist before import, or the mount fails loudly and nothing
   is mounted. The specifier is refused before anything is spawned if it carries control characters
   or shell metacharacters.
-- **It mounts whatever it resolves to:** a V1 package bridges hook by hook, a V2 definition runs its
-  native `setup` - the same shape-based routing as every other path.
+- **It mounts whatever it resolves to:** a V1 package bridges hook by hook, a `{id, setup}` V2 definition runs its
+  native `setup` while an Effect-only `{id, effect}` definition is refused out loud for direct host mounting - the same shape-based routing as every other path.
 - **`pnpm:` and `bun:` are aliases**, not real pnpm/bun installs: they install through the same
   spawned manager, and the mount note says so plainly rather than implying otherwise.
 - The mount note names the installed version, the requested spec, the entry, and the manager that

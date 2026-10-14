@@ -31,7 +31,7 @@ export const COMPAT_MATRIX: readonly MatrixRow[] = [
   {
     hook: "tool.execute.after",
     level: "partial",
-    v2: 'ctx.tool.hook("execute.after")',
+    v2: 'ctx.tool.hook("execute.after") — completed writes result.output/metadata, error writes error.message/metadata; V1 output.title dropped on both branches (V2 tool hooks write back only result/error.message, no title field: tools doc)',
     test: "bridge: tool.execute.after writes error.message and metadata on failure",
   },
   {
@@ -43,7 +43,7 @@ export const COMPAT_MATRIX: readonly MatrixRow[] = [
   {
     hook: "chat.params",
     level: "partial",
-    v2: 'ctx.session.hook("context")',
+    v2: 'ctx.session.hook("context", "compaction", "generate", "title")',
     test: "bridge: chat.params maps onto context generation options",
   },
   {
@@ -67,7 +67,7 @@ export const COMPAT_MATRIX: readonly MatrixRow[] = [
   {
     hook: "tool.definition",
     level: "partial",
-    v2: "ctx.tool.transform",
+    v2: "ctx.tool.transform editor — V2's synchronous editor forces an apply-time snapshot of the async V1 hook; re-mapping needs the source domain's reload() (migrate-v1: keep the callback synchronous, cheap, side-effect-free)",
     test: "bridge: tool.definition applies a snapshot through a transform",
   },
   {
@@ -85,7 +85,7 @@ export const COMPAT_MATRIX: readonly MatrixRow[] = [
   {
     hook: "client.session.messages",
     level: "partial",
-    v2: "ctx.session.context - active context only (messages after the last compaction); HTTP session.messages is unreachable",
+    v2: "ctx.session.context({ sessionID }) — active context only (post-compaction messages, not the full transcript); the full transcript (HTTP session.messages) is unreachable from the facade",
     test: "facade: session.messages returns the V1 envelope with tokens",
   },
   {
@@ -109,19 +109,19 @@ export const COMPAT_MATRIX: readonly MatrixRow[] = [
   {
     hook: "experimental.chat.system.transform",
     level: "partial",
-    v2: 'ctx.session.hook("context")',
+    v2: 'ctx.session.hook("context", "compaction", "generate", "title")',
     test: "bridge: system transform preserves untouched parts",
   },
   {
     hook: "experimental.chat.messages.transform",
-    level: "full",
-    v2: 'ctx.session.hook("context")',
+    level: "partial",
+    v2: 'ctx.session.hook("context", "compaction", "generate", "title") — non-text V1 parts land verbatim in content with no V2 ContentPart destination (prompt contract admits only text/files/agents/skills)',
     test: "bridge: messages transform round-trips the V1 {info,parts} envelope",
   },
   {
     hook: "experimental.session.compacting",
     level: "partial",
-    v2: 'ctx.session.hook("compaction")',
+    v2: 'ctx.session.hook("compaction") — output.context appended to system; output.prompt accepted but ignored (SessionCompactionResult carries summary/providerState?/metadata?/tokens? only, no prompt field)',
     test: "bridge: compacting appends context to the compaction system",
   },
   {

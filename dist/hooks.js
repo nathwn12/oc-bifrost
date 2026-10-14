@@ -210,7 +210,18 @@ export async function registerV1Hooks(ctx, hooks, reporter) {
     /* ---------------- chat.params ---------------- */
     const chatParams = asHandler(table["chat.params"]);
     if (chatParams) {
-        await ctx.session.hook("context", async (event) => {
+        // Fanned out to every model-request kind: V2 runs exactly one of these
+        // hooks per request - each session flow runs its own plugin hook
+        // (packages/core/src/session/model-request.ts:220-228, 420-428) - so a
+        // transformation meant for every request must register for each kind
+        // (migrate-v1 guide: register context, compaction, generate, and title
+        // separately). The per-hook WeakSet skips a repeat delivery of the SAME
+        // event object, so one request can never apply the transform twice.
+        const paramsSeen = new WeakSet();
+        const onParamsRequest = async (event) => {
+            if (paramsSeen.has(event))
+                return;
+            paramsSeen.add(event);
             const options = (event.options ?? {});
             const output = {
                 temperature: options.temperature,
@@ -230,8 +241,11 @@ export async function registerV1Hooks(ctx, hooks, reporter) {
                 options.maxTokens = output.maxOutputTokens;
             Object.assign(options, output.options ?? {});
             event.options = options;
-        });
-        reporter.record("chat.params", "partial", "mapped onto session context generation options");
+        };
+        for (const kind of ["context", "compaction", "generate", "title"]) {
+            await ctx.session.hook(kind, onParamsRequest);
+        }
+        reporter.record("chat.params", "partial", "mapped onto session context/compaction/generate/title generation options");
     }
     /* ---------------- chat.headers ---------------- */
     const chatHeaders = asHandler(table["chat.headers"]);
@@ -313,7 +327,15 @@ export async function registerV1Hooks(ctx, hooks, reporter) {
     // session:context callbacks in registration order.
     const messagesTransform = asHandler(table["experimental.chat.messages.transform"]);
     if (messagesTransform) {
-        await ctx.session.hook("context", async (event) => {
+        // Same fan-out as chat.params above: every model-request kind carries the
+        // same SessionRequest fields (system/messages/options), and the optional
+        // `agent` read below tolerates the title shape, which carries no agent
+        // (packages/plugin session.d.ts: SessionTitle extends SessionRequest).
+        const messagesSeen = new WeakSet();
+        const onMessagesRequest = async (event) => {
+            if (messagesSeen.has(event))
+                return;
+            messagesSeen.add(event);
             // Pre-fill the V1 {info, parts}[] envelope per V2 message so plugins that
             // read `m.info.role` / `m.info.model` unguarded never crash. `model` is
             // built from the real V2 Model.Ref shape (packages/schema/src/model.ts:18-22):
@@ -376,13 +398,21 @@ export async function registerV1Hooks(ctx, hooks, reporter) {
                     event.messages = output.messages.map((message) => toPlainMessage(message));
                 }
             }
-        });
-        reporter.record("experimental.chat.messages.transform", "full", "V2 Message[] -> V1 {info,parts}[] pre-fill; originals kept whole only when the shape is unchanged, otherwise plain messages from the hook's own envelope");
+        };
+        for (const kind of ["context", "compaction", "generate", "title"]) {
+            await ctx.session.hook(kind, onMessagesRequest);
+        }
+        reporter.record("experimental.chat.messages.transform", "full", "V2 Message[] -> V1 {info,parts}[] pre-fill on session context/compaction/generate/title; originals kept whole only when the shape is unchanged, otherwise plain messages from the hook's own envelope");
     }
     /* ---------------- experimental.chat.system.transform ---------------- */
     const systemTransform = asHandler(table["experimental.chat.system.transform"]);
     if (systemTransform) {
-        await ctx.session.hook("context", async (event) => {
+        // Same fan-out as chat.params above; the title shape carries system too.
+        const systemSeen = new WeakSet();
+        const onSystemRequest = async (event) => {
+            if (systemSeen.has(event))
+                return;
+            systemSeen.add(event);
             // V1 sees `string[]`; V2 carries `SystemPart[]`
             // (`packages/ai/src/schema/messages.ts:21-27` - text parts with optional
             // cache/metadata). The write-back pairs entries with originals ONLY when
@@ -410,8 +440,11 @@ export async function registerV1Hooks(ctx, hooks, reporter) {
                     event.system = output.system.map((text) => ({ type: "text", text }));
                 }
             }
-        });
-        reporter.record("experimental.chat.system.transform", "partial", "string[] <-> SystemPart[] round-trip; originals kept only when the shape is unchanged, otherwise plain text parts");
+        };
+        for (const kind of ["context", "compaction", "generate", "title"]) {
+            await ctx.session.hook(kind, onSystemRequest);
+        }
+        reporter.record("experimental.chat.system.transform", "partial", "string[] <-> SystemPart[] round-trip on session context/compaction/generate/title; originals kept only when the shape is unchanged, otherwise plain text parts");
     }
     /* ---------------- experimental.session.compacting ---------------- */
     const compacting = asHandler(table["experimental.session.compacting"]);

@@ -16,7 +16,7 @@ import { pathToFileURL } from "node:url";
 import { Plugin } from "@opencode/plugin";
 import { createReporter, renderReport } from "./report.js";
 import { createReportSink } from "./sink.js";
-import { discover } from "./discover.js";
+import { discover, effectOnlyRefusal } from "./discover.js";
 import { buildV1Context } from "./context.js";
 import { hasKnownV1Hook, registerV1Hooks } from "./hooks.js";
 import { scanStrandedV1, strandedWarning } from "./scan.js";
@@ -312,7 +312,7 @@ export default Plugin.define({
                         reporter.record(`v2:${shape.id}`, "mounted", "V2 setup invoked with the host context");
                     }
                     else {
-                        reporter.record(`v2:${shape.id}`, "unsupported", "effect-only V2 definitions are not mountable as a promise plugin");
+                        reporter.record(`v2:${shape.id}`, "unsupported", effectOnlyRefusal(shape.id, entry.spec));
                         // Refused, not mounted: the setup never executed, so the entry
                         // must not gain package-level "mounted" rows nor the mounted-gated
                         // freshness/TUI side effects below.

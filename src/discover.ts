@@ -3,7 +3,10 @@
  *
  * V2 rejects a module whose default export is not `{ id, setup | effect }`.
  * oc-bifrost exists to widen that gate: it recognises V1 factory exports,
- * V1 module exports, and V2 definitions, and routes each to the right path.
+ * V1 module exports, and mountable V2 definitions (`{ id, setup }`), and
+ * routes each to the right path. An effect-only default export (`{ id,
+ * effect }`, no `setup`) is Effect-native and must be mounted directly by
+ * the host, not through the bridge — discovery refuses it out loud.
  */
 import type { V1Plugin } from "./types.js"
 
@@ -18,13 +21,27 @@ export type Discovery =
   | { kind: "v2"; id: string; definition: V2Definition; note?: string }
   | { kind: "unknown"; reason: string }
 
-function isV2(value: unknown): value is V2Definition {
+export function effectOnlyRefusal(id: string, spec: string): string {
+  return (
+    `effect-only V2 definition "${id}" ("${spec}") uses the Effect-native "effect" entry (no "setup") — ` +
+    `mount it directly by the host, not through the bridge; see https://opencode.ai/v2/docs/build/plugins/effect/#effect`
+  )
+}
+
+function isEffectOnly(value: unknown): value is V2Definition {
   if (!value || typeof value !== "object") return false
   const candidate = value as Record<string, unknown>
   return (
     typeof candidate.id === "string" &&
-    (typeof candidate.setup === "function" || typeof candidate.effect === "function")
+    typeof candidate.effect === "function" &&
+    typeof candidate.setup !== "function"
   )
+}
+
+function isV2(value: unknown): value is V2Definition {
+  if (!value || typeof value !== "object") return false
+  const candidate = value as Record<string, unknown>
+  return typeof candidate.id === "string" && typeof candidate.setup === "function"
 }
 
 function isFactory(value: unknown): value is V1Plugin {
@@ -38,6 +55,10 @@ export function discover(module: Record<string, unknown>, spec: string): Discove
 
   if (isV2(module.default)) {
     return { kind: "v2", id: module.default.id, definition: module.default, note: "native V2 definition" }
+  }
+
+  if (isEffectOnly(module.default)) {
+    return { kind: "unknown", reason: effectOnlyRefusal(module.default.id, spec) }
   }
 
   // V1 module shape: { id?, server: Plugin }.

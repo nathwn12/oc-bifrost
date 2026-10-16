@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="assets/icon.svg" width="128" height="128" alt="oc-bifrost icon" />
+  <img src="assets/icon.svg" width="120" height="120" alt="oc-bifrost icon" />
 </p>
 <h1 align="center">oc-bifrost</h1>
 <p align="center"><strong>Run V1-era OpenCode plugin hooks on the OpenCode V2 runtime. V2 hard-rejects them at load; this small plugin loads them anyway.</strong></p>

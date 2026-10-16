@@ -62,6 +62,6 @@ npm run check     # typecheck + compile + tests
 
 - Exception to the house two-track model: for this repo **npm tracks `main` 1:1** - a fix on `main` releases to npm as the next patch. There is no slow/stable npm track here.
 - Install specs:
-  - npm: `"@nathwn12/oc-bifrost@1.6.4"`
+  - npm: `"@nathwn12/oc-bifrost@1.6.5"`
   - github package form: `"@nathwn12/oc-bifrost@git+https://github.com/nathwn12/oc-bifrost.git#<full sha>"`
 - `main` is the release line: every fix lands on `main` and ships to npm as the next patch via tag `vX.Y.Z`. Create `release/X.Y` only when cutting that minor line's first stable (patches/backports); branch per line, never per version. Cutting a tag publishes - it is an owner action.

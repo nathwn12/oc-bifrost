@@ -1,5 +1,56 @@
 # Changelog
 
+## [1.6.5] - 2026-10-16
+
+### Fixed
+
+- **Shell facade no longer spawns through a shell** (`src/shell.ts`).
+  The tagged template used to compose a command string and spawn it with
+  `shell: true`, so an interpolated value could break out of its quoting
+  and run as a second command. It now composes an argv array and spawns
+  directly (`shell: false`): literal text is split into words with
+  `'`/`"` grouping honoured, every interpolated value travels as exactly
+  one argv element, and shell-only syntax is refused by name. A follow-up
+  carries word/quote state across template segments in one `ArgvBuilder`,
+  so `pre${x}post` collapses to one word and a quote opened in one segment
+  still groups the interpolation in the next.
+- **Registry entries stored portably** (`src/registry.ts`). Cold installs
+  recorded `path.relative` verbatim, so a Windows entry (`dist\entry.mjs`)
+  failed the warm-path shape check on the next start. Entries are stored
+  POSIX-separated on every platform, and an existing Windows-separated
+  record is normalized before the shape check, so the cache heals instead
+  of needing a re-install; traversal records are still refused.
+- **Effect-only definitions refused, model-request transforms fanned out**
+  (`src/discover.ts`, `src/hooks.ts`, `src/compat-matrix.ts`). An
+  Effect-native `{id, effect}` definition is refused at discovery with one
+  message shared by the mount path (`{id, setup}` still mounts). The V1
+  `chat.params`, `messages.transform`, and `system.transform` transforms
+  now register on context, compaction, generate, and title behind a
+  single-application guard; five silent losses are documented in the compat
+  matrix and one row level is corrected from full to partial.
+
+### Changed
+
+- **House brand shape pass** (`README.md`, `CHANGELOG.md`): icon renders at
+  120px, footer newline normalized, released heading back to
+  `## [1.6.4] - 2026-10-11`.
+- **Host plugin pins aligned to `2.0.30`** (`package.json`): peer range
+  `>=2.0.0` is now the exact `2.0.30`, dev moves to `2.0.30` with
+  `@opencode-ai/plugin` `^1.19.2` and `@types/node` `^22.20.5`; the empty
+  `dependencies` table is gone and `assets/` ships in the tarball.
+- **CI template alignment** (`.github/workflows/ci.yml`): house template
+  with the cost-rule comment, lockfile auto-detect install, and
+  `npm run build` / `npm test` via `--if-present`.
+- **Ref/branch cleanup**: the `push` trigger no longer filters on
+  `branches: [main]`.
+- **Build script renamed to `compile`** (`package.json`): no build-family
+  lifecycle name remains, so a consumer install has no compile step to
+  trigger; `check`, `ci.yml`, and the dev-loop docs call `compile`.
+- **Install docs name all four mount routes** (`INSTALL.md`): the registry
+  package path (`1.6.0+`) is documented with its specifier forms,
+  spawned-manager order, cache layout, and alias-honesty note.
+- **Hygiene**: stub/placeholder wording cleared, dead CI badge dropped.
+
 ## [1.6.4] - 2026-10-11
 
 ### Fixed

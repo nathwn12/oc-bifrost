@@ -11,7 +11,7 @@
 
 ## What it is
 
-oc-bifrost is an OpenCode plugin that runs V1-era plugin hooks on the OpenCode V2 runtime, which otherwise hard-rejects a V1 module at load (`Plugin must export a default definition with an id and an effect or setup function`). Each named module is routed by shape: V1 hook modules get their hooks translated one by one against the compatibility matrix, while V2-shaped `{id, setup}` definitions mount as-is, exactly as the host would mount them, and Effect-only `{id, effect}` definitions are refused out loud for direct host mounting. Plugins are sourced from GitHub (the snapshot-first `github:` route), the npm registry, a local path, or a bundled offline fallback (`preset:rtk`). It is published as `@nathwn12/oc-bifrost` — these docs describe `1.6.4` — and needs Node 22 or later on the host.
+oc-bifrost is an OpenCode plugin that runs V1-era plugin hooks on the OpenCode V2 runtime, which otherwise hard-rejects a V1 module at load (`Plugin must export a default definition with an id and an effect or setup function`). Each named module is routed by shape: V1 hook modules get their hooks translated one by one against the compatibility matrix, while V2-shaped `{id, setup}` definitions mount as-is, exactly as the host would mount them, and Effect-only `{id, effect}` definitions are refused out loud for direct host mounting. Plugins are sourced from GitHub (the snapshot-first `github:` route), the npm registry, a local path, or a bundled offline fallback (`preset:rtk`). It is published as `@nathwn12/oc-bifrost` — these docs describe `1.6.5` — and needs Node 22 or later on the host.
 
 ## Why
 
@@ -36,7 +36,7 @@ OpenCode V2 intentionally broke the V1 plugin API, stranding every V1-era plugin
 {
   "plugins": [
     {
-      "package": "@nathwn12/oc-bifrost@1.6.4",
+      "package": "@nathwn12/oc-bifrost@1.6.5",
       "options": {
         "trustRemote": true, // consent: the first `github:` fetch downloads and executes a remote plugin
         "plugins": ["github:obra/superpowers"]
@@ -54,7 +54,7 @@ OpenCode V2 intentionally broke the V1 plugin API, stranding every V1-era plugin
 
 Name each legacy plugin with exactly one specifier in `options.plugins`: `github:<owner>/<repo>[@<ref>][#<path>]` (the advertised default route), a registry package, a local path, or the bundled `preset:rtk` for offline hosts:
 ```jsonc
-{ "package": "@nathwn12/oc-bifrost@1.6.4", "options": { "plugins": ["preset:rtk"] } }
+{ "package": "@nathwn12/oc-bifrost@1.6.5", "options": { "plugins": ["preset:rtk"] } }
 ```
 On load the bridge prints a per-plugin mount report naming every hook that bridged (`full`), was approximated (`partial`), or was refused (`unsupported`), plus each `github:` resolved commit and digest; the same lines are mirrored to `~/.cache/opencode/oc-bifrost/report.log` (`$XDG_CACHE_HOME` when set, `OC_BIFROST_REPORT=<path>` to redirect, `off` to disable). The remaining options are `strict` (default `false`: abort setup on an unsupported or unmountable hook), `verbose` (default `true`: print the report), `freshness` (`off` / `online`: opt-in pin-vs-upstream check, never downloads plugin code), `provision` (`host` / `npm` / `off`: how a fetched snapshot's declared dependencies are provided), and `wireTui` (default `false`: opt-in TUI wiring for a mounted snapshot). A plugin's external prerequisites are not the bridge's job: if it shells out to a binary, that binary must exist on `PATH`, and a `github:` fetch carries no npm dependencies.
 
